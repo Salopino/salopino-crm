@@ -420,4 +420,16 @@ const inputStyle = {
 const cellStyle = {
   padding: 12,
   borderBottom: "1px solid #22293a",
-};
+};async function updateStatus(id, newStatus) {
+  const { error } = await supabase
+    .from("clients")
+    .update({ status: newStatus })
+    .eq("id", id);
+
+  if (error) {
+    console.error("Status päivitys epäonnistui:", error);
+    return;
+  }
+
+  fetchClients();
+}
