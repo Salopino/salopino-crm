@@ -19,6 +19,20 @@ const STATUS_COLORS = {
   hävitty: "#dc2626",
 };
 
+function formatDate(value) {
+  if (!value) return "-";
+  return value;
+}
+
+function isDueTodayOrEarlier(dateString) {
+  if (!dateString) return false;
+  const today = new Date();
+  const localToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const due = new Date(dateString);
+  const localDue = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+  return localDue <= localToday;
+}
+
 export default function Home() {
   const [form, setForm] = useState({
     name: "",
@@ -27,6 +41,10 @@ export default function Home() {
     phone: "",
     status: "liidi",
     value: 0,
+    probability: 0,
+    next_action: "",
+    next_action_date: "",
+    last_contact_date: "",
   });
 
   const [clients, setClients] = useState([]);
@@ -70,6 +88,10 @@ export default function Home() {
       phone: form.phone.trim() || null,
       status: form.status,
       value: Number(form.value) || 0,
+      probability: Number(form.probability) || 0,
+      next_action: form.next_action.trim() || null,
+      next_action_date: form.next_action_date || null,
+      last_contact_date: form.last_contact_date || null,
     };
 
     const { error } = await supabase.from("clients").insert([payload]);
@@ -87,6 +109,10 @@ export default function Home() {
       phone: "",
       status: "liidi",
       value: 0,
+      probability: 0,
+      next_action: "",
+      next_action_date: "",
+      last_contact_date: "",
     });
 
     fetchClients();
@@ -130,6 +156,16 @@ export default function Home() {
     }, {});
   }, [clients]);
 
+  const contactsToday = useMemo(() => {
+    return clients
+      .filter((client) => client.next_action_date && isDueTodayOrEarlier(client.next_action_date))
+      .sort((a, b) => {
+        if (!a.next_action_date) return 1;
+        if (!b.next_action_date) return -1;
+        return new Date(a.next_action_date) - new Date(b.next_action_date);
+      });
+  }, [clients]);
+
   return (
     <main
       style={{
@@ -155,12 +191,58 @@ export default function Home() {
         <MetricCard title="Hävitty €" value={totals.lost} color="#dc2626" />
       </div>
 
+      <section
+        style={{
+          background: "#111522",
+          border: "1px solid #22293a",
+          borderRadius: 12,
+          padding: 20,
+          marginBottom: 28,
+          maxWidth: 1200,
+        }}
+      >
+        <h2 style={{ marginTop: 0, marginBottom: 14 }}>Ota yhteyttä tänään</h2>
+
+        {contactsToday.length === 0 ? (
+          <div style={{ color: "#9ca3af" }}>Ei erääntyneitä follow-uppeja.</div>
+        ) : (
+          <div style={{ display: "grid", gap: 12 }}>
+            {contactsToday.map((client) => (
+              <div
+                key={client.id}
+                style={{
+                  background: "#0b0f19",
+                  border: "1px solid #2a3144",
+                  borderLeft: `4px solid ${STATUS_COLORS[client.status] || "#6b7280"}`,
+                  borderRadius: 10,
+                  padding: 14,
+                }}
+              >
+                <div style={{ fontSize: 18, fontWeight: 700 }}>{client.name}</div>
+                <div style={{ color: "#d1d5db", marginTop: 4 }}>
+                  {client.company || "Ei yritystä"} · {client.status || "-"} · {Number(client.value || 0)} €
+                </div>
+                <div style={{ color: "#9ca3af", marginTop: 6 }}>
+                  Seuraava toimenpide: {client.next_action || "-"}
+                </div>
+                <div style={{ color: "#9ca3af", marginTop: 4 }}>
+                  Päivä: {formatDate(client.next_action_date)} · Viimeisin kontakti: {formatDate(client.last_contact_date)}
+                </div>
+                <div style={{ color: "#9ca3af", marginTop: 4 }}>
+                  Sähköposti: {client.email || "-"} · Puhelin: {client.phone || "-"} · Todennäköisyys: {Number(client.probability || 0)} %
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(3, minmax(220px, 1fr))",
+          gridTemplateColumns: "repeat(4, minmax(220px, 1fr))",
           gap: 16,
-          maxWidth: 1100,
+          maxWidth: 1400,
           marginBottom: 20,
         }}
       >
@@ -209,6 +291,35 @@ export default function Home() {
           value={form.value}
           onChange={(e) => updateField("value", e.target.value)}
           placeholder="Arvo €"
+          style={inputStyle}
+        />
+
+        <input
+          type="number"
+          value={form.probability}
+          onChange={(e) => updateField("probability", e.target.value)}
+          placeholder="Todennäköisyys %"
+          style={inputStyle}
+        />
+
+        <input
+          value={form.next_action}
+          onChange={(e) => updateField("next_action", e.target.value)}
+          placeholder="Seuraava toimenpide"
+          style={inputStyle}
+        />
+
+        <input
+          type="date"
+          value={form.next_action_date}
+          onChange={(e) => updateField("next_action_date", e.target.value)}
+          style={inputStyle}
+        />
+
+        <input
+          type="date"
+          value={form.last_contact_date}
+          onChange={(e) => updateField("last_contact_date", e.target.value)}
           style={inputStyle}
         />
       </div>
@@ -260,14 +371,25 @@ export default function Home() {
         <table
           style={{
             width: "100%",
-            maxWidth: 1200,
+            maxWidth: 1500,
             borderCollapse: "collapse",
             background: "#111522",
           }}
         >
           <thead>
             <tr>
-              {["Nimi", "Yritys", "Sähköposti", "Puhelin", "Status", "Arvo €"].map((h) => (
+              {[
+                "Nimi",
+                "Yritys",
+                "Sähköposti",
+                "Puhelin",
+                "Status",
+                "Arvo €",
+                "Tod. %",
+                "Seuraava toimenpide",
+                "Seuraava päivä",
+                "Viim. kontakti",
+              ].map((h) => (
                 <th
                   key={h}
                   style={{
@@ -303,6 +425,10 @@ export default function Home() {
                   </span>
                 </td>
                 <td style={cellStyle}>{Number(client.value || 0)} €</td>
+                <td style={cellStyle}>{Number(client.probability || 0)} %</td>
+                <td style={cellStyle}>{client.next_action || "-"}</td>
+                <td style={cellStyle}>{formatDate(client.next_action_date)}</td>
+                <td style={cellStyle}>{formatDate(client.last_contact_date)}</td>
               </tr>
             ))}
           </tbody>
@@ -389,8 +515,17 @@ export default function Home() {
                         <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 4 }}>
                           {client.email || "-"}
                         </div>
-                        <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 8 }}>
+                        <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 4 }}>
                           {client.phone || "-"}
+                        </div>
+                        <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 4 }}>
+                          Todennäköisyys: {Number(client.probability || 0)} %
+                        </div>
+                        <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 4 }}>
+                          Seuraava: {client.next_action || "-"}
+                        </div>
+                        <div style={{ fontSize: 13, color: "#9ca3af", marginBottom: 8 }}>
+                          Päivä: {formatDate(client.next_action_date)}
                         </div>
                         <div style={{ fontSize: 15, fontWeight: 700 }}>{Number(client.value || 0)} €</div>
 
