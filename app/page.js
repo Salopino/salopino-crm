@@ -92,6 +92,21 @@ export default function Home() {
     fetchClients();
   }
 
+  async function updateStatus(id, newStatus) {
+    const { error } = await supabase
+      .from("clients")
+      .update({ status: newStatus })
+      .eq("id", id);
+
+    if (error) {
+      console.error("Status päivitys epäonnistui:", error);
+      alert("Status päivitys epäonnistui");
+      return;
+    }
+
+    fetchClients();
+  }
+
   const totals = useMemo(() => {
     const pipeline = clients
       .filter((c) => !["voitettu", "hävitty"].includes(c.status))
@@ -378,6 +393,26 @@ export default function Home() {
                           {client.phone || "-"}
                         </div>
                         <div style={{ fontSize: 15, fontWeight: 700 }}>{Number(client.value || 0)} €</div>
+
+                        <select
+                          value={client.status}
+                          onChange={(e) => updateStatus(client.id, e.target.value)}
+                          style={{
+                            marginTop: 8,
+                            padding: 8,
+                            borderRadius: 6,
+                            width: "100%",
+                            border: "1px solid #374151",
+                            background: "#fff",
+                            color: "#111",
+                          }}
+                        >
+                          {STATUS_OPTIONS.map((s) => (
+                            <option key={s} value={s}>
+                              {s}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     ))
                   )}
@@ -420,16 +455,4 @@ const inputStyle = {
 const cellStyle = {
   padding: 12,
   borderBottom: "1px solid #22293a",
-};async function updateStatus(id, newStatus) {
-  const { error } = await supabase
-    .from("clients")
-    .update({ status: newStatus })
-    .eq("id", id);
-
-  if (error) {
-    console.error("Status päivitys epäonnistui:", error);
-    return;
-  }
-
-  fetchClients();
-}
+};
