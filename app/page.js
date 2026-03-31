@@ -17,35 +17,57 @@ export default function Home() {
   }, []);
 
   async function fetchClients() {
-    const { data } = await supabase.from("clients").select("*");
+    const { data, error } = await supabase
+      .from("clients")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Virhe haussa:", error);
+      return;
+    }
+
     setClients(data || []);
   }
 
   async function addClient() {
-    if (!name) return;
+    if (!name.trim()) return;
 
-    await supabase.from("clients").insert([{ name }]);
+    const { error } = await supabase
+      .from("clients")
+      .insert([{ name: name.trim() }]);
+
+    if (error) {
+      console.error("Virhe lisäyksessä:", error);
+      alert("Asiakkaan lisäys epäonnistui");
+      return;
+    }
+
     setName("");
     fetchClients();
   }
 
   return (
-    <div style={{ padding: 40 }}>
+    <main style={{ padding: 40, color: "white", background: "#0b0b10", minHeight: "100vh" }}>
       <h1>Salopino CRM 🚀</h1>
 
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Asiakkaan nimi"
-      />
-
-      <button onClick={addClient}>Lisää</button>
+      <div style={{ marginTop: 20, marginBottom: 30 }}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Asiakkaan nimi"
+          style={{ padding: 10, marginRight: 10, minWidth: 280 }}
+        />
+        <button onClick={addClient} style={{ padding: "10px 16px" }}>
+          Lisää
+        </button>
+      </div>
 
       <ul>
         {clients.map((c) => (
           <li key={c.id}>{c.name}</li>
         ))}
       </ul>
-    </div>
+    </main>
   );
 }
