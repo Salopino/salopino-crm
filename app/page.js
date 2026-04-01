@@ -17,6 +17,8 @@ const NAV_ITEMS = [
   { id: "settings", label: "Asetukset" },
 ];
 
+const STATUS_OPTIONS = ["liidi", "kartoitus", "tarjous", "seuranta", "voitettu", "hävitty"];
+
 const STATUS_COLORS = {
   liidi: "#94a3b8",
   kartoitus: "#3b82f6",
@@ -31,6 +33,22 @@ const TASK_PRIORITY_COLORS = {
   normaali: "#3b82f6",
   korkea: "#f59e0b",
   kriittinen: "#ef4444",
+};
+
+const emptyClientForm = {
+  name: "",
+  company: "",
+  email: "",
+  phone: "",
+  status: "liidi",
+  value: 0,
+  probability: 0,
+  next_action: "",
+  next_action_date: "",
+  last_contact_date: "",
+  company_linkedin: "",
+  quote_link: "",
+  notes: "",
 };
 
 export default function Home() {
@@ -78,12 +96,69 @@ export default function Home() {
     setLoading(false);
   }
 
-  const dashboardData = useMemo(() => buildDashboardData(clients, tasks, finance, cashflow), [
-    clients,
-    tasks,
-    finance,
-    cashflow,
-  ]);
+  async function createClientRecord(form) {
+    if (!form.name.trim()) {
+      alert("Anna asiakkaan nimi");
+      return { ok: false };
+    }
+
+    const payload = normalizeClientPayload(form);
+
+    const { error } = await supabase.from("clients").insert([payload]);
+
+    if (error) {
+      console.error("Virhe asiakkaan lisäyksessä:", error);
+      alert("Asiakkaan lisäys epäonnistui");
+      return { ok: false };
+    }
+
+    await fetchAll();
+    return { ok: true };
+  }
+
+  async function updateClientRecord(id, form) {
+    if (!id) return { ok: false };
+
+    if (!form.name.trim()) {
+      alert("Anna asiakkaan nimi");
+      return { ok: false };
+    }
+
+    const payload = normalizeClientPayload(form);
+
+    const { error } = await supabase.from("clients").update(payload).eq("id", id);
+
+    if (error) {
+      console.error("Virhe asiakkaan päivityksessä:", error);
+      alert("Asiakkaan päivitys epäonnistui");
+      return { ok: false };
+    }
+
+    await fetchAll();
+    return { ok: true };
+  }
+
+  async function deleteClientRecord(id, label) {
+    if (!id) return;
+
+    const ok = window.confirm(`Poistetaanko asiakas "${label || "asiakas"}"?`);
+    if (!ok) return;
+
+    const { error } = await supabase.from("clients").delete().eq("id", id);
+
+    if (error) {
+      console.error("Virhe asiakkaan poistossa:", error);
+      alert("Asiakkaan poisto epäonnistui");
+      return;
+    }
+
+    await fetchAll();
+  }
+
+  const dashboardData = useMemo(
+    () => buildDashboardData(clients, tasks, finance, cashflow),
+    [clients, tasks, finance, cashflow]
+  );
 
   const pageTitle = useMemo(() => {
     return NAV_ITEMS.find((n) => n.id === activeView)?.label || "Dashboard";
@@ -107,7 +182,10 @@ export default function Home() {
                 style={{
                   ...navButton,
                   background: activeView === item.id ? "#1b2540" : "transparent",
-                  border: activeView === item.id ? "1px solid rgba(231,223,178,0.22)" : "1px solid transparent",
+                  border:
+                    activeView === item.id
+                      ? "1px solid rgba(231,223,178,0.22)"
+                      : "1px solid transparent",
                 }}
               >
                 {item.label}
@@ -132,18 +210,19 @@ export default function Home() {
             </div>
           </header>
 
-          {errorText ? (
-            <div style={errorBoxStyle}>{errorText}</div>
-          ) : null}
+          {errorText ? <div style={errorBoxStyle}>{errorText}</div> : null}
 
           {activeView === "dashboard" && (
             <DashboardView loading={loading} data={dashboardData} />
           )}
 
           {activeView === "crm" && (
-            <PlaceholderView
-              title="CRM"
-              text="Tähän seuraavaksi kytketään asiakkaiden muokkaus, yhteyshenkilöt, tehtävät ja tarjouslinkit."
+            <CRMView
+              loading={loading}
+              clients={clients}
+              onCreate={createClientRecord}
+              onUpdate={updateClientRecord}
+              onDelete={deleteClientRecord}
             />
           )}
 
@@ -332,43 +411,373 @@ function DashboardView({ loading, data }) {
           )}
         </Panel>
       </div>
+    </div>
+  );
+}
 
-      <div style={twoColGrid}>
-        <Panel title="Kuumat liidit">
-          <PanelHint text="Avoimet caset, joiden todennäköisyys on vähintään 60 %." />
-          {loading ? (
-            <EmptyText text="Ladataan…" />
-          ) : data.hotLeads.length === 0 ? (
-            <EmptyText text="Ei kuumia liidejä juuri nyt." />
-          ) : (
-            <div style={stackStyle}>
-              {data.hotLeads.map((client) => (
-                <ReminderCard
-                  key={client.id}
-                  color="#f59e0b"
-                  title={client.name || "Nimetön asiakas"}
-                  subtitle={`${client.company || "Ei yritystä"} · ${formatCurrency(client.value)}`}
-                  line1={`Todennäköisyys: ${formatPercent(client.probability)}`}
-                  line2={`Status: ${client.status || "-"} · Seuraava: ${client.next_action || "-"}`}
-                  line3={`Päivä: ${formatDate(client.next_action_date)}`}
-                />
-              ))}
-            </div>
-          )}
-        </Panel>
+function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
+  const [form, setForm] = useState(emptyClientForm);
+  const [editingId, setEditingId] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("kaikki");
+  const [submitting, setSubmitting] = useState(false);
 
-        <Panel title="Viimeisimmät talousluvut">
-          <PanelHint text="Viimeisimmän finance_monthly-rivin luvut." />
-          <div style={miniMetricsGrid}>
-            <MiniMetric title="Liikevaihto" value={loading ? "…" : formatCurrency(data.latestFinance?.revenue)} />
-            <MiniMetric title="Tulos" value={loading ? "…" : formatCurrency(data.latestFinance?.net_result)} />
-            <MiniMetric title="Saamiset" value={loading ? "…" : formatCurrency(data.latestFinance?.receivables)} />
-            <MiniMetric title="Velat" value={loading ? "…" : formatCurrency(data.latestFinance?.liabilities)} />
-            <MiniMetric title="Oma pääoma" value={loading ? "…" : formatCurrency(data.latestFinance?.equity)} />
-            <MiniMetric title="Raporttikuukausi" value={loading ? "…" : formatDate(data.latestFinance?.report_month)} />
+  const filteredClients = useMemo(() => {
+    return clients.filter((client) => {
+      const q = search.trim().toLowerCase();
+
+      const matchesSearch =
+        !q ||
+        (client.name || "").toLowerCase().includes(q) ||
+        (client.company || "").toLowerCase().includes(q) ||
+        (client.email || "").toLowerCase().includes(q) ||
+        (client.phone || "").toLowerCase().includes(q);
+
+      const matchesStatus =
+        statusFilter === "kaikki" || (client.status || "").toLowerCase() === statusFilter;
+
+      return matchesSearch && matchesStatus;
+    });
+  }, [clients, search, statusFilter]);
+
+  function updateField(field, value) {
+    setForm((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function startEdit(client) {
+    setEditingId(client.id);
+    setForm({
+      name: client.name || "",
+      company: client.company || "",
+      email: client.email || "",
+      phone: client.phone || "",
+      status: client.status || "liidi",
+      value: Number(client.value || 0),
+      probability: Number(client.probability || 0),
+      next_action: client.next_action || "",
+      next_action_date: client.next_action_date || "",
+      last_contact_date: client.last_contact_date || "",
+      company_linkedin: client.company_linkedin || "",
+      quote_link: client.quote_link || "",
+      notes: client.notes || "",
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function cancelEdit() {
+    setEditingId("");
+    setForm(emptyClientForm);
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setSubmitting(true);
+
+    const result = editingId
+      ? await onUpdate(editingId, form)
+      : await onCreate(form);
+
+    setSubmitting(false);
+
+    if (result?.ok) {
+      setEditingId("");
+      setForm(emptyClientForm);
+    }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 22 }}>
+      <SectionTitle
+        title="Toimiva CRM"
+        description="Lisää, muokkaa, hae ja hallitse asiakkaita. Tämä näkymä on nyt oikeasti käytettävä työpiste."
+      />
+
+      <Panel title={editingId ? "Muokkaa asiakasta" : "Lisää uusi asiakas"}>
+        <form onSubmit={handleSubmit}>
+          <div style={crmFormGrid}>
+            <Field label="Asiakkaan nimi" help="Pakollinen">
+              <input
+                value={form.name}
+                onChange={(e) => updateField("name", e.target.value)}
+                style={inputStyle}
+                placeholder="Esim. Kari Luttinen"
+              />
+            </Field>
+
+            <Field label="Yritys" help="Organisaatio">
+              <input
+                value={form.company}
+                onChange={(e) => updateField("company", e.target.value)}
+                style={inputStyle}
+                placeholder="Esim. C Interim Oy"
+              />
+            </Field>
+
+            <Field label="Sähköposti" help="Yhteydenotto ja tarjoukset">
+              <input
+                value={form.email}
+                onChange={(e) => updateField("email", e.target.value)}
+                style={inputStyle}
+                placeholder="nimi@yritys.fi"
+              />
+            </Field>
+
+            <Field label="Puhelin" help="Nopea yhteys">
+              <input
+                value={form.phone}
+                onChange={(e) => updateField("phone", e.target.value)}
+                style={inputStyle}
+                placeholder="040 123 4567"
+              />
+            </Field>
+
+            <Field label="Status" help="Myyntivaihe">
+              <select
+                value={form.status}
+                onChange={(e) => updateField("status", e.target.value)}
+                style={inputStyle}
+              >
+                {STATUS_OPTIONS.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            <Field label="Arvo €" help="Kaupan arvo">
+              <input
+                type="number"
+                value={form.value}
+                onChange={(e) => updateField("value", e.target.value)}
+                style={inputStyle}
+                placeholder="0"
+              />
+            </Field>
+
+            <Field label="Todennäköisyys %" help="Weighted pipelinea varten">
+              <input
+                type="number"
+                value={form.probability}
+                onChange={(e) => updateField("probability", e.target.value)}
+                style={inputStyle}
+                placeholder="0"
+              />
+            </Field>
+
+            <Field label="Seuraava toimenpide" help="Mitä tehdään seuraavaksi">
+              <input
+                value={form.next_action}
+                onChange={(e) => updateField("next_action", e.target.value)}
+                style={inputStyle}
+                placeholder="Soita tarjouksesta"
+              />
+            </Field>
+
+            <Field label="Seuraava päivä" help="Milloin seuraava toimenpide tehdään">
+              <input
+                type="date"
+                value={form.next_action_date}
+                onChange={(e) => updateField("next_action_date", e.target.value)}
+                style={inputStyle}
+              />
+            </Field>
+
+            <Field label="Viimeisin kontakti" help="Milloin viimeksi olit yhteydessä">
+              <input
+                type="date"
+                value={form.last_contact_date}
+                onChange={(e) => updateField("last_contact_date", e.target.value)}
+                style={inputStyle}
+              />
+            </Field>
+
+            <Field label="LinkedIn-linkki" help="Yritys tai henkilö">
+              <input
+                value={form.company_linkedin}
+                onChange={(e) => updateField("company_linkedin", e.target.value)}
+                style={inputStyle}
+                placeholder="https://linkedin.com/..."
+              />
+            </Field>
+
+            <Field label="Tarjouslinkki" help="PDF tai tarjousnäkymä">
+              <input
+                value={form.quote_link}
+                onChange={(e) => updateField("quote_link", e.target.value)}
+                style={inputStyle}
+                placeholder="https://..."
+              />
+            </Field>
           </div>
-        </Panel>
-      </div>
+
+          <div style={{ marginTop: 16 }}>
+            <Field label="Muistiinpanot" help="Lisätiedot asiakkaasta tai tilanteesta">
+              <textarea
+                value={form.notes}
+                onChange={(e) => updateField("notes", e.target.value)}
+                style={textareaStyle}
+                placeholder="Kirjaa tähän tärkeät huomiot"
+              />
+            </Field>
+          </div>
+
+          <div style={buttonRowStyle}>
+            <button type="submit" style={primaryButtonStyle} disabled={submitting}>
+              {submitting
+                ? "Tallennetaan..."
+                : editingId
+                ? "Tallenna muutokset"
+                : "Lisää asiakas"}
+            </button>
+
+            {editingId ? (
+              <button type="button" style={secondaryButtonStyle} onClick={cancelEdit}>
+                Peru muokkaus
+              </button>
+            ) : null}
+          </div>
+        </form>
+      </Panel>
+
+      <Panel title="Asiakasrekisteri">
+        <div style={toolbarStyle}>
+          <div style={toolbarLeftStyle}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={searchInputStyle}
+              placeholder="Hae nimellä, yrityksellä, sähköpostilla tai puhelimella"
+            />
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              style={filterSelectStyle}
+            >
+              <option value="kaikki">Kaikki statukset</option>
+              {STATUS_OPTIONS.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ color: "#94a3b8", fontSize: 14 }}>
+            {loading ? "Ladataan..." : `${filteredClients.length} asiakasta`}
+          </div>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                {[
+                  "Nimi",
+                  "Yritys",
+                  "Status",
+                  "Arvo",
+                  "Tod. %",
+                  "Seuraava toimenpide",
+                  "Päivä",
+                  "Viim. kontakti",
+                  "LinkedIn",
+                  "Tarjous",
+                  "Toiminnot",
+                ].map((h) => (
+                  <th key={h} style={thStyle}>
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={11} style={emptyRowStyle}>
+                    Ladataan asiakkaita...
+                  </td>
+                </tr>
+              ) : filteredClients.length === 0 ? (
+                <tr>
+                  <td colSpan={11} style={emptyRowStyle}>
+                    Ei osumia valituilla hakuehdoilla.
+                  </td>
+                </tr>
+              ) : (
+                filteredClients.map((client) => (
+                  <tr key={client.id}>
+                    <td style={tdStyleStrong}>{client.name || "-"}</td>
+                    <td style={tdStyle}>{client.company || "-"}</td>
+                    <td style={tdStyle}>
+                      <span
+                        style={{
+                          ...statusBadgeStyle,
+                          background: STATUS_COLORS[client.status] || "#64748b",
+                        }}
+                      >
+                        {client.status || "-"}
+                      </span>
+                    </td>
+                    <td style={tdStyle}>{formatCurrency(client.value)}</td>
+                    <td style={tdStyle}>{formatPercent(client.probability)}</td>
+                    <td style={tdStyle}>{client.next_action || "-"}</td>
+                    <td style={tdStyle}>{formatDate(client.next_action_date)}</td>
+                    <td style={tdStyle}>{formatDate(client.last_contact_date)}</td>
+                    <td style={tdStyle}>
+                      {client.company_linkedin ? (
+                        <a
+                          href={safeUrl(client.company_linkedin)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={linkButtonStyle}
+                        >
+                          Avaa
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td style={tdStyle}>
+                      {client.quote_link ? (
+                        <a
+                          href={safeUrl(client.quote_link)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={linkButtonStyle}
+                        >
+                          Tarjous
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td style={tdStyle}>
+                      <div style={rowButtonsStyle}>
+                        <button
+                          onClick={() => startEdit(client)}
+                          style={miniActionButtonStyle}
+                          type="button"
+                        >
+                          Muokkaa
+                        </button>
+                        <button
+                          onClick={() => onDelete(client.id, client.name || client.company)}
+                          style={miniDeleteButtonStyle}
+                          type="button"
+                        >
+                          Poista
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
     </div>
   );
 }
@@ -382,17 +791,57 @@ function FinanceView({ loading, data }) {
       />
 
       <div style={metricsGrid}>
-        <MetricCard title="Kassasaldo" value={loading ? "…" : formatCurrency(data.cashBalance)} color="#14b8a6" subtext="Viimeisin raportti" />
-        <MetricCard title="Saamiset" value={loading ? "…" : formatCurrency(data.latestFinance?.receivables)} color="#3b82f6" subtext="Viimeisin finance_monthly" />
-        <MetricCard title="Velat" value={loading ? "…" : formatCurrency(data.latestFinance?.liabilities)} color="#ef4444" subtext="Viimeisin finance_monthly" />
-        <MetricCard title="Oma pääoma" value={loading ? "…" : formatCurrency(data.latestFinance?.equity)} color="#eab308" subtext="Viimeisin finance_monthly" />
+        <MetricCard
+          title="Kassasaldo"
+          value={loading ? "…" : formatCurrency(data.cashBalance)}
+          color="#14b8a6"
+          subtext="Viimeisin raportti"
+        />
+        <MetricCard
+          title="Saamiset"
+          value={loading ? "…" : formatCurrency(data.latestFinance?.receivables)}
+          color="#3b82f6"
+          subtext="Viimeisin finance_monthly"
+        />
+        <MetricCard
+          title="Velat"
+          value={loading ? "…" : formatCurrency(data.latestFinance?.liabilities)}
+          color="#ef4444"
+          subtext="Viimeisin finance_monthly"
+        />
+        <MetricCard
+          title="Oma pääoma"
+          value={loading ? "…" : formatCurrency(data.latestFinance?.equity)}
+          color="#eab308"
+          subtext="Viimeisin finance_monthly"
+        />
       </div>
 
       <div style={metricsGrid}>
-        <MetricCard title="Tulossa sisään 30 pv" value={loading ? "…" : formatCurrency(data.incoming30d)} color="#22c55e" subtext="cashflow_events" />
-        <MetricCard title="Lähdössä ulos 30 pv" value={loading ? "…" : formatCurrency(data.outgoing30d)} color="#f97316" subtext="cashflow_events" />
-        <MetricCard title="Netto 30 pv" value={loading ? "…" : formatCurrency(data.net30d)} color="#38bdf8" subtext="Sisään – ulos" />
-        <MetricCard title="Myöhässä saamiset" value={loading ? "…" : formatCurrency(data.overdueReceivables)} color="#ef4444" subtext="Erääntyneet forecast/invoiced" />
+        <MetricCard
+          title="Tulossa sisään 30 pv"
+          value={loading ? "…" : formatCurrency(data.incoming30d)}
+          color="#22c55e"
+          subtext="cashflow_events"
+        />
+        <MetricCard
+          title="Lähdössä ulos 30 pv"
+          value={loading ? "…" : formatCurrency(data.outgoing30d)}
+          color="#f97316"
+          subtext="cashflow_events"
+        />
+        <MetricCard
+          title="Netto 30 pv"
+          value={loading ? "…" : formatCurrency(data.net30d)}
+          color="#38bdf8"
+          subtext="Sisään – ulos"
+        />
+        <MetricCard
+          title="Myöhässä saamiset"
+          value={loading ? "…" : formatCurrency(data.overdueReceivables)}
+          color="#ef4444"
+          subtext="Erääntyneet forecast/invoiced"
+        />
       </div>
 
       <Panel title="Finance-monthly yhteenveto">
@@ -413,7 +862,7 @@ function PlaceholderView({ title, text }) {
   return (
     <Panel title={title}>
       <PanelHint text={text} />
-      <EmptyText text="Tämä näkymä jätettiin tarkoituksella rungoksi, jotta ensin saatiin dashboard ja talous oikeaan dataan kiinni." />
+      <EmptyText text="Tämä näkymä jätettiin tarkoituksella rungoksi, jotta ensin saatiin dashboard ja CRM oikeasti käyttöön." />
     </Panel>
   );
 }
@@ -452,7 +901,8 @@ function buildDashboardData(clients, tasks, finance, cashflow) {
 
   const wonCount = clients.filter((c) => (c.status || "").toLowerCase() === "voitettu").length;
   const lostCount = clients.filter((c) => (c.status || "").toLowerCase() === "hävitty").length;
-  const winRate = wonCount + lostCount > 0 ? Math.round((wonCount / (wonCount + lostCount)) * 100) : 0;
+  const winRate =
+    wonCount + lostCount > 0 ? Math.round((wonCount / (wonCount + lostCount)) * 100) : 0;
 
   const openInvoices = clients.reduce((sum, c) => {
     const invoiced = Number(c.invoiced_amount || 0);
@@ -469,12 +919,7 @@ function buildDashboardData(clients, tasks, finance, cashflow) {
       if (!baseDate) return false;
       const d = dateOnly(new Date(baseDate));
       if (Number.isNaN(d.getTime())) return false;
-      return (
-        direction === "in" &&
-        ["forecast", "invoiced", "paid"].includes(status) &&
-        d >= today &&
-        d <= dateOnly(in30d)
-      );
+      return direction === "in" && ["forecast", "invoiced", "paid"].includes(status) && d >= today && d <= dateOnly(in30d);
     })
     .reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
@@ -486,12 +931,7 @@ function buildDashboardData(clients, tasks, finance, cashflow) {
       if (!baseDate) return false;
       const d = dateOnly(new Date(baseDate));
       if (Number.isNaN(d.getTime())) return false;
-      return (
-        direction === "out" &&
-        ["forecast", "invoiced", "paid"].includes(status) &&
-        d >= today &&
-        d <= dateOnly(in30d)
-      );
+      return direction === "out" && ["forecast", "invoiced", "paid"].includes(status) && d >= today && d <= dateOnly(in30d);
     })
     .reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
@@ -568,11 +1008,45 @@ function buildDashboardData(clients, tasks, finance, cashflow) {
   };
 }
 
+function normalizeClientPayload(form) {
+  return {
+    name: form.name.trim(),
+    company: form.company.trim() || null,
+    email: form.email.trim() || null,
+    phone: form.phone.trim() || null,
+    status: form.status || "liidi",
+    value: Number(form.value) || 0,
+    probability: Number(form.probability) || 0,
+    next_action: form.next_action.trim() || null,
+    next_action_date: form.next_action_date || null,
+    last_contact_date: form.last_contact_date || null,
+    company_linkedin: form.company_linkedin.trim() || null,
+    quote_link: form.quote_link.trim() || null,
+    notes: form.notes.trim() || null,
+  };
+}
+
+function safeUrl(url) {
+  if (!url) return null;
+  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+  return `https://${url}`;
+}
+
 function SectionTitle({ title, description }) {
   return (
     <div style={{ marginBottom: 6 }}>
       <div style={{ fontSize: 30, fontWeight: 800, marginBottom: 6 }}>{title}</div>
       <div style={{ color: "#94a3b8", fontSize: 15 }}>{description}</div>
+    </div>
+  );
+}
+
+function Field({ label, help, children }) {
+  return (
+    <div>
+      <div style={fieldLabelStyle}>{label}</div>
+      <div style={fieldHelpStyle}>{help}</div>
+      {children}
     </div>
   );
 }
@@ -847,4 +1321,192 @@ const miniMetricStyle = {
   border: "1px solid #22304a",
   borderRadius: 14,
   padding: 14,
+};
+
+const crmFormGrid = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(220px, 1fr))",
+  gap: 16,
+};
+
+const fieldLabelStyle = {
+  fontSize: 13,
+  fontWeight: 700,
+  color: "#e5e7eb",
+  marginBottom: 6,
+};
+
+const fieldHelpStyle = {
+  fontSize: 12,
+  color: "#94a3b8",
+  marginBottom: 8,
+};
+
+const inputStyle = {
+  width: "100%",
+  padding: 14,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#f8fafc",
+  color: "#111827",
+  boxSizing: "border-box",
+};
+
+const textareaStyle = {
+  width: "100%",
+  minHeight: 110,
+  padding: 14,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#f8fafc",
+  color: "#111827",
+  boxSizing: "border-box",
+  resize: "vertical",
+};
+
+const buttonRowStyle = {
+  display: "flex",
+  gap: 12,
+  marginTop: 18,
+  flexWrap: "wrap",
+};
+
+const primaryButtonStyle = {
+  padding: "12px 18px",
+  fontSize: 15,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#0f766e",
+  color: "white",
+  border: "none",
+  borderRadius: 12,
+};
+
+const secondaryButtonStyle = {
+  padding: "12px 18px",
+  fontSize: 15,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#1f2937",
+  color: "white",
+  border: "1px solid #374151",
+  borderRadius: 12,
+};
+
+const toolbarStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 12,
+  marginBottom: 18,
+  flexWrap: "wrap",
+};
+
+const toolbarLeftStyle = {
+  display: "flex",
+  gap: 12,
+  flexWrap: "wrap",
+  flex: 1,
+};
+
+const searchInputStyle = {
+  minWidth: 340,
+  padding: 12,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#0b0f19",
+  color: "#f8fafc",
+};
+
+const filterSelectStyle = {
+  minWidth: 220,
+  padding: 12,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#0b0f19",
+  color: "#f8fafc",
+};
+
+const tableStyle = {
+  width: "100%",
+  borderCollapse: "collapse",
+};
+
+const thStyle = {
+  textAlign: "left",
+  padding: 12,
+  borderBottom: "1px solid #2a3144",
+  color: "#d9dbe3",
+  whiteSpace: "nowrap",
+  fontSize: 13,
+};
+
+const tdStyle = {
+  padding: 12,
+  borderBottom: "1px solid #22293a",
+  whiteSpace: "nowrap",
+  fontSize: 14,
+  color: "#e5e7eb",
+  verticalAlign: "top",
+};
+
+const tdStyleStrong = {
+  ...tdStyle,
+  fontWeight: 700,
+};
+
+const emptyRowStyle = {
+  padding: 16,
+  color: "#94a3b8",
+  borderBottom: "1px solid #22293a",
+};
+
+const statusBadgeStyle = {
+  color: "white",
+  padding: "4px 10px",
+  borderRadius: 999,
+  fontSize: 13,
+  fontWeight: 700,
+};
+
+const rowButtonsStyle = {
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const miniActionButtonStyle = {
+  padding: "8px 10px",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#1d4ed8",
+  color: "white",
+  border: "none",
+  borderRadius: 10,
+};
+
+const miniDeleteButtonStyle = {
+  padding: "8px 10px",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#b91c1c",
+  color: "white",
+  border: "none",
+  borderRadius: 10,
+};
+
+const linkButtonStyle = {
+  display: "inline-block",
+  padding: "6px 10px",
+  borderRadius: 8,
+  background: "#1d4ed8",
+  color: "white",
+  textDecoration: "none",
+  fontSize: 13,
+  fontWeight: 700,
 };
