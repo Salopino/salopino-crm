@@ -155,6 +155,22 @@ export default function Home() {
     await fetchAll();
   }
 
+  async function updateClientStatus(id, newStatus) {
+    const { error } = await supabase
+      .from("clients")
+      .update({ status: newStatus })
+      .eq("id", id);
+
+    if (error) {
+      console.error("Virhe statuksen päivityksessä:", error);
+      alert("Statuksen päivitys epäonnistui");
+      return { ok: false };
+    }
+
+    await fetchAll();
+    return { ok: true };
+  }
+
   const dashboardData = useMemo(
     () => buildDashboardData(clients, tasks, finance, cashflow),
     [clients, tasks, finance, cashflow]
@@ -227,9 +243,10 @@ export default function Home() {
           )}
 
           {activeView === "kanban" && (
-            <PlaceholderView
-              title="Kanban"
-              text="Tähän seuraavaksi kytketään oikea kanban-putki clients-taulun statuksista."
+            <KanbanView
+              loading={loading}
+              clients={clients}
+              onUpdateStatus={updateClientStatus}
             />
           )}
 
@@ -782,6 +799,269 @@ function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
   );
 }
 
+function KanbanView({ loading, clients, onUpdateStatus }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("kaikki");
+  const [busyId, setBusyId] = useState("");
+
+  const filteredClients = useMemo(() => {
+    return clients.filter((client) => {
+      const q = search.trim().toLowerCase();
+
+      const matchesSearch =
+        !q ||
+        (client.name || "").toLowerCase().includes(q) ||
+        (client.company || "").toLowerCase().includes(q) ||
+        (client.email || "").toLowerCase().includes(q) ||
+        (client.phone || "").toLowerCase().includes(q) ||
+        (client.next_action || "").toLowerCase().includes(q);
+
+      const matchesStatus =
+        statusFilter === "kaikki" || (client.status || "").toLowerCase() === statusFilter;
+
+      return matchesSearch && matchesStatus;
+    });
+  }, [clients, search, statusFilter]);
+
+  const grouped = useMemo(() => {
+    return STATUS_OPTIONS.reduce((acc, status) => {
+      acc[status] = filteredClients.filter(
+        (client) => (client.status || "liidi").toLowerCase() === status
+      );
+      return acc;
+    }, {});
+  }, [filteredClients]);
+
+  async function handleStatusChange(clientId, newStatus) {
+    setBusyId(clientId);
+    await onUpdateStatus(clientId, newStatus);
+    setBusyId("");
+  }
+
+  async function moveLeft(client) {
+    const currentIndex = STATUS_OPTIONS.indexOf((client.status || "liidi").toLowerCase());
+    if (currentIndex <= 0) return;
+    const newStatus = STATUS_OPTIONS[currentIndex - 1];
+    await handleStatusChange(client.id, newStatus);
+  }
+
+  async function moveRight(client) {
+    const currentIndex = STATUS_OPTIONS.indexOf((client.status || "liidi").toLowerCase());
+    if (currentIndex === -1 || currentIndex >= STATUS_OPTIONS.length - 1) return;
+    const newStatus = STATUS_OPTIONS[currentIndex + 1];
+    await handleStatusChange(client.id, newStatus);
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 22 }}>
+      <SectionTitle
+        title="Toimiva Kanban"
+        description="Siirrä asiakkaita myyntivaiheesta toiseen. Status päivittyy suoraan clients-tauluun."
+      />
+
+      <Panel title="Kanban-ohjaus">
+        <div style={toolbarStyle}>
+          <div style={toolbarLeftStyle}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={searchInputStyle}
+              placeholder="Hae nimellä, yrityksellä, sähköpostilla, puhelimella tai seuraavalla toimenpiteellä"
+            />
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              style={filterSelectStyle}
+            >
+              <option value="kaikki">Kaikki statukset</option>
+              {STATUS_OPTIONS.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ color: "#94a3b8", fontSize: 14 }}>
+            {loading ? "Ladataan..." : `${filteredClients.length} casea`}
+          </div>
+        </div>
+
+        <div style={kanbanBoardStyle}>
+          {STATUS_OPTIONS.map((status) => {
+            const items = grouped[status] || [];
+            const total = items.reduce((sum, item) => sum + Number(item.value || 0), 0);
+
+            return (
+              <div
+                key={status}
+                style={{
+                  ...kanbanColumnStyle,
+                  borderTop: `3px solid ${STATUS_COLORS[status] || "#64748b"}`,
+                }}
+              >
+                <div style={kanbanColumnHeaderStyle}>
+                  <div>
+                    <div style={{ fontSize: 20, fontWeight: 800, textTransform: "capitalize" }}>
+                      {status}
+                    </div>
+                    <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 4 }}>
+                      {items.length} kpl · {formatCurrency(total)}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: "50%",
+                      background: STATUS_COLORS[status] || "#64748b",
+                      flexShrink: 0,
+                    }}
+                  />
+                </div>
+
+                <div style={kanbanCardsWrapStyle}>
+                  {loading ? (
+                    <EmptyText text="Ladataan..." />
+                  ) : items.length === 0 ? (
+                    <div style={emptyKanbanCardStyle}>Ei caseja tässä vaiheessa</div>
+                  ) : (
+                    items.map((client) => {
+                      const currentIndex = STATUS_OPTIONS.indexOf((client.status || "liidi").toLowerCase());
+
+                      return (
+                        <div key={client.id} style={kanbanCardStyle}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <div>
+                              <div style={kanbanCardTitleStyle}>
+                                {client.name || "Nimetön asiakas"}
+                              </div>
+                              <div style={kanbanCardCompanyStyle}>
+                                {client.company || "Ei yritystä"}
+                              </div>
+                            </div>
+
+                            <span
+                              style={{
+                                ...statusBadgeStyle,
+                                background: STATUS_COLORS[client.status] || "#64748b",
+                                height: "fit-content",
+                              }}
+                            >
+                              {client.status || "-"}
+                            </span>
+                          </div>
+
+                          <div style={kanbanMetaGridStyle}>
+                            <div>
+                              <div style={kanbanMetaLabelStyle}>Arvo</div>
+                              <div style={kanbanMetaValueStyle}>{formatCurrency(client.value)}</div>
+                            </div>
+                            <div>
+                              <div style={kanbanMetaLabelStyle}>Tod. %</div>
+                              <div style={kanbanMetaValueStyle}>{formatPercent(client.probability)}</div>
+                            </div>
+                          </div>
+
+                          <div style={kanbanInfoLineStyle}>
+                            <strong>Seuraava:</strong> {client.next_action || "-"}
+                          </div>
+                          <div style={kanbanInfoLineStyle}>
+                            <strong>Päivä:</strong> {formatDate(client.next_action_date)}
+                          </div>
+                          <div style={kanbanInfoLineStyle}>
+                            <strong>Puhelin:</strong> {client.phone || "-"}
+                          </div>
+                          <div style={kanbanInfoLineStyle}>
+                            <strong>Sähköposti:</strong> {client.email || "-"}
+                          </div>
+
+                          <div style={kanbanLinksStyle}>
+                            {client.company_linkedin ? (
+                              <a
+                                href={safeUrl(client.company_linkedin)}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={linkButtonStyle}
+                              >
+                                LinkedIn
+                              </a>
+                            ) : null}
+
+                            {client.quote_link ? (
+                              <a
+                                href={safeUrl(client.quote_link)}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={linkButtonStyle}
+                              >
+                                Tarjous
+                              </a>
+                            ) : null}
+                          </div>
+
+                          <div style={{ marginTop: 12 }}>
+                            <select
+                              value={client.status || "liidi"}
+                              onChange={(e) => handleStatusChange(client.id, e.target.value)}
+                              style={kanbanSelectStyle}
+                              disabled={busyId === client.id}
+                            >
+                              {STATUS_OPTIONS.map((s) => (
+                                <option key={s} value={s}>
+                                  {s}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div style={kanbanButtonsRowStyle}>
+                            <button
+                              type="button"
+                              style={{
+                                ...kanbanMoveButtonStyle,
+                                opacity: currentIndex <= 0 || busyId === client.id ? 0.45 : 1,
+                                cursor: currentIndex <= 0 || busyId === client.id ? "not-allowed" : "pointer",
+                              }}
+                              onClick={() => moveLeft(client)}
+                              disabled={currentIndex <= 0 || busyId === client.id}
+                            >
+                              ← Edellinen
+                            </button>
+
+                            <button
+                              type="button"
+                              style={{
+                                ...kanbanMoveButtonStyle,
+                                opacity:
+                                  currentIndex >= STATUS_OPTIONS.length - 1 || busyId === client.id ? 0.45 : 1,
+                                cursor:
+                                  currentIndex >= STATUS_OPTIONS.length - 1 || busyId === client.id
+                                    ? "not-allowed"
+                                    : "pointer",
+                              }}
+                              onClick={() => moveRight(client)}
+                              disabled={currentIndex >= STATUS_OPTIONS.length - 1 || busyId === client.id}
+                            >
+                              Seuraava →
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function FinanceView({ loading, data }) {
   return (
     <div style={{ display: "grid", gap: 22 }}>
@@ -862,7 +1142,7 @@ function PlaceholderView({ title, text }) {
   return (
     <Panel title={title}>
       <PanelHint text={text} />
-      <EmptyText text="Tämä näkymä jätettiin tarkoituksella rungoksi, jotta ensin saatiin dashboard ja CRM oikeasti käyttöön." />
+      <EmptyText text="Tämä näkymä jätettiin tarkoituksella rungoksi, jotta ensin saatiin dashboard, CRM ja Kanban oikeasti käyttöön." />
     </Panel>
   );
 }
@@ -1509,4 +1789,121 @@ const linkButtonStyle = {
   textDecoration: "none",
   fontSize: 13,
   fontWeight: 700,
+};
+
+const kanbanBoardStyle = {
+  display: "grid",
+  gridTemplateColumns: "repeat(6, minmax(250px, 1fr))",
+  gap: 16,
+  alignItems: "start",
+};
+
+const kanbanColumnStyle = {
+  background: "#0c1220",
+  border: "1px solid #23314a",
+  borderRadius: 18,
+  padding: 14,
+  minHeight: 520,
+  boxShadow: "0 12px 28px rgba(0,0,0,0.18)",
+};
+
+const kanbanColumnHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 10,
+  alignItems: "center",
+  marginBottom: 14,
+};
+
+const kanbanCardsWrapStyle = {
+  display: "grid",
+  gap: 12,
+};
+
+const kanbanCardStyle = {
+  background: "#111827",
+  border: "1px solid #2d3a53",
+  borderRadius: 16,
+  padding: 14,
+};
+
+const kanbanCardTitleStyle = {
+  fontSize: 17,
+  fontWeight: 800,
+  lineHeight: 1.2,
+};
+
+const kanbanCardCompanyStyle = {
+  fontSize: 13,
+  color: "#94a3b8",
+  marginTop: 4,
+};
+
+const kanbanMetaGridStyle = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 10,
+  marginTop: 12,
+  marginBottom: 10,
+};
+
+const kanbanMetaLabelStyle = {
+  fontSize: 12,
+  color: "#94a3b8",
+  marginBottom: 4,
+};
+
+const kanbanMetaValueStyle = {
+  fontSize: 15,
+  fontWeight: 700,
+};
+
+const kanbanInfoLineStyle = {
+  fontSize: 13,
+  color: "#d1d5db",
+  marginTop: 6,
+  lineHeight: 1.4,
+};
+
+const kanbanLinksStyle = {
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+  marginTop: 12,
+};
+
+const kanbanSelectStyle = {
+  width: "100%",
+  padding: 10,
+  fontSize: 14,
+  borderRadius: 10,
+  border: "1px solid #334155",
+  background: "#f8fafc",
+  color: "#111827",
+};
+
+const kanbanButtonsRowStyle = {
+  display: "flex",
+  gap: 8,
+  marginTop: 10,
+};
+
+const kanbanMoveButtonStyle = {
+  flex: 1,
+  padding: "10px 12px",
+  fontSize: 13,
+  fontWeight: 700,
+  background: "#1f2937",
+  color: "white",
+  border: "1px solid #374151",
+  borderRadius: 10,
+};
+
+const emptyKanbanCardStyle = {
+  background: "#0b0f19",
+  border: "1px dashed #374151",
+  borderRadius: 12,
+  padding: 12,
+  color: "#6b7280",
+  fontSize: 14,
 };
