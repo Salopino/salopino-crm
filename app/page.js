@@ -18,7 +18,6 @@ const NAV_ITEMS = [
 ];
 
 const STATUS_OPTIONS = ["liidi", "kartoitus", "tarjous", "seuranta", "voitettu", "hävitty"];
-const QUOTE_STATUS_OPTIONS = ["luonnos", "lähetetty", "hyväksytty", "hylätty", "vanhentunut"];
 
 const STATUS_COLORS = {
   liidi: "#94a3b8",
@@ -27,14 +26,6 @@ const STATUS_COLORS = {
   seuranta: "#8b5cf6",
   voitettu: "#22c55e",
   hävitty: "#ef4444",
-};
-
-const QUOTE_STATUS_COLORS = {
-  luonnos: "#64748b",
-  lähetetty: "#3b82f6",
-  hyväksytty: "#22c55e",
-  hylätty: "#ef4444",
-  vanhentunut: "#f59e0b",
 };
 
 const TASK_PRIORITY_COLORS = {
@@ -60,29 +51,6 @@ const emptyClientForm = {
   notes: "",
 };
 
-const createEmptyQuoteLine = () => ({
-  service_name: "",
-  description: "",
-  quantity: 1,
-  unit: "kpl",
-  unit_price: 0,
-});
-
-const emptyQuoteForm = {
-  client_id: "",
-  title: "",
-  description: "",
-  status: "luonnos",
-  quote_date: "",
-  valid_until: "",
-  vat_percent: 25.5,
-  payment_terms: "",
-  delivery_terms: "",
-  pdf_link: "",
-  notes: "",
-  lines: [createEmptyQuoteLine()],
-};
-
 export default function Home() {
   const [activeView, setActiveView] = useState("dashboard");
 
@@ -90,8 +58,6 @@ export default function Home() {
   const [tasks, setTasks] = useState([]);
   const [finance, setFinance] = useState([]);
   const [cashflow, setCashflow] = useState([]);
-  const [quotes, setQuotes] = useState([]);
-  const [quoteLines, setQuoteLines] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState("");
@@ -104,20 +70,11 @@ export default function Home() {
     setLoading(true);
     setErrorText("");
 
-    const [
-      clientsRes,
-      tasksRes,
-      financeRes,
-      cashflowRes,
-      quotesRes,
-      quoteLinesRes,
-    ] = await Promise.all([
+    const [clientsRes, tasksRes, financeRes, cashflowRes] = await Promise.all([
       supabase.from("clients").select("*").order("created_at", { ascending: false }),
       supabase.from("tasks").select("*").order("due_date", { ascending: true }),
       supabase.from("finance_monthly").select("*").order("report_month", { ascending: false }).limit(12),
       supabase.from("cashflow_events").select("*").order("event_date", { ascending: false }).limit(500),
-      supabase.from("quotes").select("*").order("created_at", { ascending: false }),
-      supabase.from("quote_lines").select("*").order("sort_order", { ascending: true }),
     ]);
 
     const errors = [
@@ -125,8 +82,6 @@ export default function Home() {
       tasksRes.error,
       financeRes.error,
       cashflowRes.error,
-      quotesRes.error,
-      quoteLinesRes.error,
     ].filter(Boolean);
 
     if (errors.length > 0) {
@@ -138,8 +93,6 @@ export default function Home() {
     setTasks(tasksRes.data || []);
     setFinance(financeRes.data || []);
     setCashflow(cashflowRes.data || []);
-    setQuotes(quotesRes.data || []);
-    setQuoteLines(quoteLinesRes.data || []);
     setLoading(false);
   }
 
@@ -150,6 +103,7 @@ export default function Home() {
     }
 
     const payload = normalizeClientPayload(form);
+
     const { error } = await supabase.from("clients").insert([payload]);
 
     if (error) {
@@ -164,12 +118,14 @@ export default function Home() {
 
   async function updateClientRecord(id, form) {
     if (!id) return { ok: false };
+
     if (!form.name.trim()) {
       alert("Anna asiakkaan nimi");
       return { ok: false };
     }
 
     const payload = normalizeClientPayload(form);
+
     const { error } = await supabase.from("clients").update(payload).eq("id", id);
 
     if (error) {
@@ -184,6 +140,7 @@ export default function Home() {
 
   async function deleteClientRecord(id, label) {
     if (!id) return;
+
     const ok = window.confirm(`Poistetaanko asiakas "${label || "asiakas"}"?`);
     if (!ok) return;
 
@@ -192,223 +149,6 @@ export default function Home() {
     if (error) {
       console.error("Virhe asiakkaan poistossa:", error);
       alert("Asiakkaan poisto epäonnistui");
-      return;
-    }
-
-    await fetchAll();
-  }
-
-  async function updateClientStatus(id, newStatus) {
-    const { error } = await supabase.from("clients").update({ status: newStatus }).eq("id", id);
-
-    if (error) {
-      console.error("Virhe statuksen päivityksessä:", error);
-      alert("Statuksen päivitys epäonnistui");
-      return { ok: false };
-    }
-
-    await fetchAll();
-    return { ok: true };
-  }
-
-  async function createQuoteRecord(form) {
-    if (!form.client_id) {
-      alert("Valitse asiakas");
-      return { ok: false };
-    }
-    if (!form.title.trim()) {
-      alert("Anna tarjouksen otsikko");
-      return { ok: false };
-    }
-
-    const cleanedLines = form.lines.filter(
-      (line) =>
-        line.service_name.trim() ||
-        line.description.trim() ||
-        Number(line.quantity || 0) > 0 ||
-        Number(line.unit_price || 0) > 0
-    );
-
-    const computed = computeQuoteTotals(cleanedLines, Number(form.vat_percent || 0));
-
-    const quoteNumber = buildQuoteNumber();
-    const quotePayload = {
-      client_id: form.client_id,
-      title: form.title.trim(),
-      description: form.description.trim() || null,
-      status: form.status || "luonnos",
-      quote_number: quoteNumber,
-      quote_date: form.quote_date || null,
-      valid_until: form.valid_until || null,
-      subtotal: computed.subtotal,
-      vat_percent: Number(form.vat_percent || 0),
-      vat_amount: computed.vatAmount,
-      total_amount: computed.total,
-      payment_terms: form.payment_terms.trim() || null,
-      delivery_terms: form.delivery_terms.trim() || null,
-      pdf_link: form.pdf_link.trim() || null,
-      notes: form.notes.trim() || null,
-    };
-
-    const { data: insertedQuote, error: quoteError } = await supabase
-      .from("quotes")
-      .insert([quotePayload])
-      .select()
-      .single();
-
-    if (quoteError) {
-      console.error("Virhe tarjouksen lisäyksessä:", quoteError);
-      alert("Tarjouksen tallennus epäonnistui");
-      return { ok: false };
-    }
-
-    if (cleanedLines.length > 0) {
-      const linesPayload = cleanedLines.map((line, index) => ({
-        quote_id: insertedQuote.id,
-        service_name: line.service_name.trim() || null,
-        description: line.description.trim() || null,
-        quantity: Number(line.quantity || 0),
-        unit: line.unit.trim() || "kpl",
-        unit_price: Number(line.unit_price || 0),
-        line_total: Number(line.quantity || 0) * Number(line.unit_price || 0),
-        sort_order: index,
-      }));
-
-      const { error: linesError } = await supabase.from("quote_lines").insert(linesPayload);
-
-      if (linesError) {
-        console.error("Virhe tarjousrivien tallennuksessa:", linesError);
-        alert("Tarjous tallentui, mutta rivien tallennus epäonnistui");
-        return { ok: false };
-      }
-    }
-
-    const clientUpdatePayload = {
-      quote_id: insertedQuote.id,
-      quote_status: form.status || "luonnos",
-      quote_link: form.pdf_link.trim() || null,
-    };
-
-    if ((form.status || "").toLowerCase() === "hyväksytty") {
-      clientUpdatePayload.status = "voitettu";
-      clientUpdatePayload.expected_cash_amount = computed.total;
-    } else if ((form.status || "").toLowerCase() === "lähetetty") {
-      clientUpdatePayload.status = "tarjous";
-    }
-
-    await supabase.from("clients").update(clientUpdatePayload).eq("id", form.client_id);
-
-    await fetchAll();
-    return { ok: true };
-  }
-
-  async function updateQuoteRecord(id, form) {
-    if (!id) return { ok: false };
-    if (!form.client_id) {
-      alert("Valitse asiakas");
-      return { ok: false };
-    }
-    if (!form.title.trim()) {
-      alert("Anna tarjouksen otsikko");
-      return { ok: false };
-    }
-
-    const cleanedLines = form.lines.filter(
-      (line) =>
-        line.service_name.trim() ||
-        line.description.trim() ||
-        Number(line.quantity || 0) > 0 ||
-        Number(line.unit_price || 0) > 0
-    );
-
-    const computed = computeQuoteTotals(cleanedLines, Number(form.vat_percent || 0));
-
-    const quotePayload = {
-      client_id: form.client_id,
-      title: form.title.trim(),
-      description: form.description.trim() || null,
-      status: form.status || "luonnos",
-      quote_date: form.quote_date || null,
-      valid_until: form.valid_until || null,
-      subtotal: computed.subtotal,
-      vat_percent: Number(form.vat_percent || 0),
-      vat_amount: computed.vatAmount,
-      total_amount: computed.total,
-      payment_terms: form.payment_terms.trim() || null,
-      delivery_terms: form.delivery_terms.trim() || null,
-      pdf_link: form.pdf_link.trim() || null,
-      notes: form.notes.trim() || null,
-    };
-
-    const { error: quoteError } = await supabase.from("quotes").update(quotePayload).eq("id", id);
-    if (quoteError) {
-      console.error("Virhe tarjouksen päivityksessä:", quoteError);
-      alert("Tarjouksen päivitys epäonnistui");
-      return { ok: false };
-    }
-
-    const { error: deleteLinesError } = await supabase.from("quote_lines").delete().eq("quote_id", id);
-    if (deleteLinesError) {
-      console.error("Virhe vanhojen rivien poistossa:", deleteLinesError);
-      alert("Tarjouksen vanhojen rivien poisto epäonnistui");
-      return { ok: false };
-    }
-
-    if (cleanedLines.length > 0) {
-      const linesPayload = cleanedLines.map((line, index) => ({
-        quote_id: id,
-        service_name: line.service_name.trim() || null,
-        description: line.description.trim() || null,
-        quantity: Number(line.quantity || 0),
-        unit: line.unit.trim() || "kpl",
-        unit_price: Number(line.unit_price || 0),
-        line_total: Number(line.quantity || 0) * Number(line.unit_price || 0),
-        sort_order: index,
-      }));
-
-      const { error: linesError } = await supabase.from("quote_lines").insert(linesPayload);
-      if (linesError) {
-        console.error("Virhe tarjousrivien tallennuksessa:", linesError);
-        alert("Tarjouksen rivien tallennus epäonnistui");
-        return { ok: false };
-      }
-    }
-
-    const clientUpdatePayload = {
-      quote_id: id,
-      quote_status: form.status || "luonnos",
-      quote_link: form.pdf_link.trim() || null,
-    };
-
-    if ((form.status || "").toLowerCase() === "hyväksytty") {
-      clientUpdatePayload.status = "voitettu";
-      clientUpdatePayload.expected_cash_amount = computed.total;
-    } else if ((form.status || "").toLowerCase() === "lähetetty") {
-      clientUpdatePayload.status = "tarjous";
-    }
-
-    await supabase.from("clients").update(clientUpdatePayload).eq("id", form.client_id);
-
-    await fetchAll();
-    return { ok: true };
-  }
-
-  async function deleteQuoteRecord(id, label) {
-    if (!id) return;
-    const ok = window.confirm(`Poistetaanko tarjous "${label || "tarjous"}"?`);
-    if (!ok) return;
-
-    const { error: linesError } = await supabase.from("quote_lines").delete().eq("quote_id", id);
-    if (linesError) {
-      console.error("Virhe tarjousrivien poistossa:", linesError);
-      alert("Tarjousrivien poisto epäonnistui");
-      return;
-    }
-
-    const { error: quoteError } = await supabase.from("quotes").delete().eq("id", id);
-    if (quoteError) {
-      console.error("Virhe tarjouksen poistossa:", quoteError);
-      alert("Tarjouksen poisto epäonnistui");
       return;
     }
 
@@ -487,22 +227,16 @@ export default function Home() {
           )}
 
           {activeView === "kanban" && (
-            <KanbanView
-              loading={loading}
-              clients={clients}
-              onUpdateStatus={updateClientStatus}
+            <PlaceholderView
+              title="Kanban"
+              text="Tähän seuraavaksi kytketään oikea kanban-putki clients-taulun statuksista."
             />
           )}
 
           {activeView === "quotes" && (
-            <QuotesView
-              loading={loading}
-              clients={clients}
-              quotes={quotes}
-              quoteLines={quoteLines}
-              onCreate={createQuoteRecord}
-              onUpdate={updateQuoteRecord}
-              onDelete={deleteQuoteRecord}
+            <PlaceholderView
+              title="Tarjoukset"
+              text="Tähän seuraavaksi kytketään quotes- ja quote_lines-taulut tarjouskoneeksi."
             />
           )}
 
@@ -531,23 +265,94 @@ function DashboardView({ loading, data }) {
       />
 
       <div style={metricsGrid}>
-        <MetricCard title="Avoin pipeline" value={loading ? "…" : formatCurrency(data.pipeline)} color="#f59e0b" subtext="Avoimet caset ilman voitettu/hävitty" />
-        <MetricCard title="Weighted pipeline" value={loading ? "…" : formatCurrency(data.weightedPipeline)} color="#8b5cf6" subtext="Arvo × todennäköisyys" />
-        <MetricCard title="Voitettu / kk" value={loading ? "…" : formatCurrency(data.wonThisMonth)} color="#22c55e" subtext="Kuluvan kuun voitetut" />
-        <MetricCard title="Win rate" value={loading ? "…" : formatPercent(data.winRate)} color="#38bdf8" subtext="Voitettu / (voitettu + hävitty)" />
+        <MetricCard
+          title="Avoin pipeline"
+          value={loading ? "…" : formatCurrency(data.pipeline)}
+          color="#f59e0b"
+          subtext="Avoimet caset ilman voitettu/hävitty"
+        />
+        <MetricCard
+          title="Weighted pipeline"
+          value={loading ? "…" : formatCurrency(data.weightedPipeline)}
+          color="#8b5cf6"
+          subtext="Arvo × todennäköisyys"
+        />
+        <MetricCard
+          title="Voitettu / kk"
+          value={loading ? "…" : formatCurrency(data.wonThisMonth)}
+          color="#22c55e"
+          subtext="Kuluvan kuun voitetut"
+        />
+        <MetricCard
+          title="Win rate"
+          value={loading ? "…" : formatPercent(data.winRate)}
+          color="#38bdf8"
+          subtext="Voitettu / (voitettu + hävitty)"
+        />
       </div>
 
       <div style={metricsGrid}>
-        <MetricCard title="Kassasaldo" value={loading ? "…" : formatCurrency(data.cashBalance)} color="#14b8a6" subtext="Viimeisin finance_monthly" />
-        <MetricCard title="Netto 30 pv" value={loading ? "…" : formatCurrency(data.net30d)} color="#3b82f6" subtext="Sisään – ulos seuraavat 30 pv" />
-        <MetricCard title="Avoimet laskut" value={loading ? "…" : formatCurrency(data.openInvoices)} color="#eab308" subtext="Laskutettu, mutta ei täysin maksettu" />
-        <MetricCard title="Myöhässä olevat saamiset" value={loading ? "…" : formatCurrency(data.overdueReceivables)} color="#ef4444" subtext="Erääntyneet sisään tulevat kassavirrat" />
+        <MetricCard
+          title="Kassasaldo"
+          value={loading ? "…" : formatCurrency(data.cashBalance)}
+          color="#14b8a6"
+          subtext="Viimeisin finance_monthly"
+        />
+        <MetricCard
+          title="Netto 30 pv"
+          value={loading ? "…" : formatCurrency(data.net30d)}
+          color="#3b82f6"
+          subtext="Sisään – ulos seuraavat 30 pv"
+        />
+        <MetricCard
+          title="Avoimet laskut"
+          value={loading ? "…" : formatCurrency(data.openInvoices)}
+          color="#eab308"
+          subtext="Laskutettu, mutta ei täysin maksettu"
+        />
+        <MetricCard
+          title="Myöhässä olevat saamiset"
+          value={loading ? "…" : formatCurrency(data.overdueReceivables)}
+          color="#ef4444"
+          subtext="Erääntyneet sisään tulevat kassavirrat"
+        />
+      </div>
+
+      <div style={metricsGrid}>
+        <MetricCard
+          title="Kontaktoitavat nyt"
+          value={loading ? "…" : String(data.contactsToday.length)}
+          color="#a855f7"
+          subtext="Seuraava toimenpide tänään tai myöhässä"
+        />
+        <MetricCard
+          title="Tehtävät tänään"
+          value={loading ? "…" : String(data.tasksToday.length)}
+          color="#2563eb"
+          subtext="Deadline tänään"
+        />
+        <MetricCard
+          title="Myöhässä tehtävät"
+          value={loading ? "…" : String(data.overdueTasks.length)}
+          color="#ef4444"
+          subtext="Deadline mennyt yli"
+        />
+        <MetricCard
+          title="Kuumat liidit"
+          value={loading ? "…" : String(data.hotLeads.length)}
+          color="#facc15"
+          subtext="Todennäköisyys vähintään 60 %"
+        />
       </div>
 
       <div style={twoColGrid}>
         <Panel title="Ota yhteyttä tänään">
           <PanelHint text="Asiakkaat, joiden seuraava toimenpide erääntyy tänään tai on jo myöhässä." />
-          {loading ? <EmptyText text="Ladataan…" /> : data.contactsToday.length === 0 ? <EmptyText text="Ei erääntyneitä follow-uppeja." /> : (
+          {loading ? (
+            <EmptyText text="Ladataan…" />
+          ) : data.contactsToday.length === 0 ? (
+            <EmptyText text="Ei erääntyneitä follow-uppeja." />
+          ) : (
             <div style={stackStyle}>
               {data.contactsToday.map((client) => (
                 <ReminderCard
@@ -574,6 +379,38 @@ function DashboardView({ loading, data }) {
           </div>
         </Panel>
       </div>
+
+      <div style={twoColGrid}>
+        <Panel title="Tehtävät tänään">
+          <PanelHint text="Avoimet tehtävät, joiden deadline on tänään." />
+          {loading ? (
+            <EmptyText text="Ladataan…" />
+          ) : data.tasksToday.length === 0 ? (
+            <EmptyText text="Ei tämän päivän tehtäviä." />
+          ) : (
+            <div style={stackStyle}>
+              {data.tasksToday.map((task) => (
+                <TaskCard key={task.id} task={task} clientName={data.clientNameById[task.client_id] || "-"} />
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Myöhässä olevat tehtävät">
+          <PanelHint text="Nämä ovat deadline-päivän yli ja vaativat reagointia." />
+          {loading ? (
+            <EmptyText text="Ladataan…" />
+          ) : data.overdueTasks.length === 0 ? (
+            <EmptyText text="Ei myöhässä olevia tehtäviä." />
+          ) : (
+            <div style={stackStyle}>
+              {data.overdueTasks.map((task) => (
+                <TaskCard key={task.id} task={task} clientName={data.clientNameById[task.client_id] || "-"} />
+              ))}
+            </div>
+          )}
+        </Panel>
+      </div>
     </div>
   );
 }
@@ -588,6 +425,7 @@ function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
   const filteredClients = useMemo(() => {
     return clients.filter((client) => {
       const q = search.trim().toLowerCase();
+
       const matchesSearch =
         !q ||
         (client.name || "").toLowerCase().includes(q) ||
@@ -635,7 +473,9 @@ function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
     e.preventDefault();
     setSubmitting(true);
 
-    const result = editingId ? await onUpdate(editingId, form) : await onCreate(form);
+    const result = editingId
+      ? await onUpdate(editingId, form)
+      : await onCreate(form);
 
     setSubmitting(false);
 
@@ -647,62 +487,155 @@ function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
 
   return (
     <div style={{ display: "grid", gap: 22 }}>
-      <SectionTitle title="Toimiva CRM" description="Lisää, muokkaa, hae ja hallitse asiakkaita." />
+      <SectionTitle
+        title="Toimiva CRM"
+        description="Lisää, muokkaa, hae ja hallitse asiakkaita. Tämä näkymä on nyt oikeasti käytettävä työpiste."
+      />
 
       <Panel title={editingId ? "Muokkaa asiakasta" : "Lisää uusi asiakas"}>
         <form onSubmit={handleSubmit}>
           <div style={crmFormGrid}>
             <Field label="Asiakkaan nimi" help="Pakollinen">
-              <input value={form.name} onChange={(e) => updateField("name", e.target.value)} style={inputStyle} placeholder="Esim. Kari Luttinen" />
+              <input
+                value={form.name}
+                onChange={(e) => updateField("name", e.target.value)}
+                style={inputStyle}
+                placeholder="Esim. Kari Luttinen"
+              />
             </Field>
+
             <Field label="Yritys" help="Organisaatio">
-              <input value={form.company} onChange={(e) => updateField("company", e.target.value)} style={inputStyle} placeholder="Esim. C Interim Oy" />
+              <input
+                value={form.company}
+                onChange={(e) => updateField("company", e.target.value)}
+                style={inputStyle}
+                placeholder="Esim. C Interim Oy"
+              />
             </Field>
+
             <Field label="Sähköposti" help="Yhteydenotto ja tarjoukset">
-              <input value={form.email} onChange={(e) => updateField("email", e.target.value)} style={inputStyle} placeholder="nimi@yritys.fi" />
+              <input
+                value={form.email}
+                onChange={(e) => updateField("email", e.target.value)}
+                style={inputStyle}
+                placeholder="nimi@yritys.fi"
+              />
             </Field>
+
             <Field label="Puhelin" help="Nopea yhteys">
-              <input value={form.phone} onChange={(e) => updateField("phone", e.target.value)} style={inputStyle} placeholder="040 123 4567" />
+              <input
+                value={form.phone}
+                onChange={(e) => updateField("phone", e.target.value)}
+                style={inputStyle}
+                placeholder="040 123 4567"
+              />
             </Field>
+
             <Field label="Status" help="Myyntivaihe">
-              <select value={form.status} onChange={(e) => updateField("status", e.target.value)} style={inputStyle}>
-                {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
+              <select
+                value={form.status}
+                onChange={(e) => updateField("status", e.target.value)}
+                style={inputStyle}
+              >
+                {STATUS_OPTIONS.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
               </select>
             </Field>
+
             <Field label="Arvo €" help="Kaupan arvo">
-              <input type="number" value={form.value} onChange={(e) => updateField("value", e.target.value)} style={inputStyle} placeholder="0" />
+              <input
+                type="number"
+                value={form.value}
+                onChange={(e) => updateField("value", e.target.value)}
+                style={inputStyle}
+                placeholder="0"
+              />
             </Field>
+
             <Field label="Todennäköisyys %" help="Weighted pipelinea varten">
-              <input type="number" value={form.probability} onChange={(e) => updateField("probability", e.target.value)} style={inputStyle} placeholder="0" />
+              <input
+                type="number"
+                value={form.probability}
+                onChange={(e) => updateField("probability", e.target.value)}
+                style={inputStyle}
+                placeholder="0"
+              />
             </Field>
+
             <Field label="Seuraava toimenpide" help="Mitä tehdään seuraavaksi">
-              <input value={form.next_action} onChange={(e) => updateField("next_action", e.target.value)} style={inputStyle} placeholder="Soita tarjouksesta" />
+              <input
+                value={form.next_action}
+                onChange={(e) => updateField("next_action", e.target.value)}
+                style={inputStyle}
+                placeholder="Soita tarjouksesta"
+              />
             </Field>
+
             <Field label="Seuraava päivä" help="Milloin seuraava toimenpide tehdään">
-              <input type="date" value={form.next_action_date} onChange={(e) => updateField("next_action_date", e.target.value)} style={inputStyle} />
+              <input
+                type="date"
+                value={form.next_action_date}
+                onChange={(e) => updateField("next_action_date", e.target.value)}
+                style={inputStyle}
+              />
             </Field>
+
             <Field label="Viimeisin kontakti" help="Milloin viimeksi olit yhteydessä">
-              <input type="date" value={form.last_contact_date} onChange={(e) => updateField("last_contact_date", e.target.value)} style={inputStyle} />
+              <input
+                type="date"
+                value={form.last_contact_date}
+                onChange={(e) => updateField("last_contact_date", e.target.value)}
+                style={inputStyle}
+              />
             </Field>
+
             <Field label="LinkedIn-linkki" help="Yritys tai henkilö">
-              <input value={form.company_linkedin} onChange={(e) => updateField("company_linkedin", e.target.value)} style={inputStyle} placeholder="https://linkedin.com/..." />
+              <input
+                value={form.company_linkedin}
+                onChange={(e) => updateField("company_linkedin", e.target.value)}
+                style={inputStyle}
+                placeholder="https://linkedin.com/..."
+              />
             </Field>
+
             <Field label="Tarjouslinkki" help="PDF tai tarjousnäkymä">
-              <input value={form.quote_link} onChange={(e) => updateField("quote_link", e.target.value)} style={inputStyle} placeholder="https://..." />
+              <input
+                value={form.quote_link}
+                onChange={(e) => updateField("quote_link", e.target.value)}
+                style={inputStyle}
+                placeholder="https://..."
+              />
             </Field>
           </div>
 
           <div style={{ marginTop: 16 }}>
             <Field label="Muistiinpanot" help="Lisätiedot asiakkaasta tai tilanteesta">
-              <textarea value={form.notes} onChange={(e) => updateField("notes", e.target.value)} style={textareaStyle} placeholder="Kirjaa tähän tärkeät huomiot" />
+              <textarea
+                value={form.notes}
+                onChange={(e) => updateField("notes", e.target.value)}
+                style={textareaStyle}
+                placeholder="Kirjaa tähän tärkeät huomiot"
+              />
             </Field>
           </div>
 
           <div style={buttonRowStyle}>
             <button type="submit" style={primaryButtonStyle} disabled={submitting}>
-              {submitting ? "Tallennetaan..." : editingId ? "Tallenna muutokset" : "Lisää asiakas"}
+              {submitting
+                ? "Tallennetaan..."
+                : editingId
+                ? "Tallenna muutokset"
+                : "Lisää asiakas"}
             </button>
-            {editingId ? <button type="button" style={secondaryButtonStyle} onClick={cancelEdit}>Peru muokkaus</button> : null}
+
+            {editingId ? (
+              <button type="button" style={secondaryButtonStyle} onClick={cancelEdit}>
+                Peru muokkaus
+              </button>
+            ) : null}
           </div>
         </form>
       </Panel>
@@ -710,10 +643,24 @@ function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
       <Panel title="Asiakasrekisteri">
         <div style={toolbarStyle}>
           <div style={toolbarLeftStyle}>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} style={searchInputStyle} placeholder="Hae nimellä, yrityksellä, sähköpostilla tai puhelimella" />
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={filterSelectStyle}>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={searchInputStyle}
+              placeholder="Hae nimellä, yrityksellä, sähköpostilla tai puhelimella"
+            />
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              style={filterSelectStyle}
+            >
               <option value="kaikki">Kaikki statukset</option>
-              {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
+              {STATUS_OPTIONS.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -726,624 +673,17 @@ function CRMView({ loading, clients, onCreate, onUpdate, onDelete }) {
           <table style={tableStyle}>
             <thead>
               <tr>
-                {["Nimi", "Yritys", "Status", "Arvo", "Tod. %", "Seuraava toimenpide", "Päivä", "Viim. kontakti", "LinkedIn", "Tarjous", "Toiminnot"].map((h) => (
-                  <th key={h} style={thStyle}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr><td colSpan={11} style={emptyRowStyle}>Ladataan asiakkaita...</td></tr>
-              ) : filteredClients.length === 0 ? (
-                <tr><td colSpan={11} style={emptyRowStyle}>Ei osumia valituilla hakuehdoilla.</td></tr>
-              ) : (
-                filteredClients.map((client) => (
-                  <tr key={client.id}>
-                    <td style={tdStyleStrong}>{client.name || "-"}</td>
-                    <td style={tdStyle}>{client.company || "-"}</td>
-                    <td style={tdStyle}>
-                      <span style={{ ...statusBadgeStyle, background: STATUS_COLORS[client.status] || "#64748b" }}>
-                        {client.status || "-"}
-                      </span>
-                    </td>
-                    <td style={tdStyle}>{formatCurrency(client.value)}</td>
-                    <td style={tdStyle}>{formatPercent(client.probability)}</td>
-                    <td style={tdStyle}>{client.next_action || "-"}</td>
-                    <td style={tdStyle}>{formatDate(client.next_action_date)}</td>
-                    <td style={tdStyle}>{formatDate(client.last_contact_date)}</td>
-                    <td style={tdStyle}>
-                      {client.company_linkedin ? <a href={safeUrl(client.company_linkedin)} target="_blank" rel="noreferrer" style={linkButtonStyle}>Avaa</a> : "-"}
-                    </td>
-                    <td style={tdStyle}>
-                      {client.quote_link ? <a href={safeUrl(client.quote_link)} target="_blank" rel="noreferrer" style={linkButtonStyle}>Tarjous</a> : "-"}
-                    </td>
-                    <td style={tdStyle}>
-                      <div style={rowButtonsStyle}>
-                        <button onClick={() => startEdit(client)} style={miniActionButtonStyle} type="button">Muokkaa</button>
-                        <button onClick={() => onDelete(client.id, client.name || client.company)} style={miniDeleteButtonStyle} type="button">Poista</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function KanbanView({ loading, clients, onUpdateStatus }) {
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("kaikki");
-  const [busyId, setBusyId] = useState("");
-
-  const filteredClients = useMemo(() => {
-    return clients.filter((client) => {
-      const q = search.trim().toLowerCase();
-
-      const matchesSearch =
-        !q ||
-        (client.name || "").toLowerCase().includes(q) ||
-        (client.company || "").toLowerCase().includes(q) ||
-        (client.email || "").toLowerCase().includes(q) ||
-        (client.phone || "").toLowerCase().includes(q) ||
-        (client.next_action || "").toLowerCase().includes(q);
-
-      const matchesStatus =
-        statusFilter === "kaikki" || (client.status || "").toLowerCase() === statusFilter;
-
-      return matchesSearch && matchesStatus;
-    });
-  }, [clients, search, statusFilter]);
-
-  const grouped = useMemo(() => {
-    return STATUS_OPTIONS.reduce((acc, status) => {
-      acc[status] = filteredClients.filter(
-        (client) => (client.status || "liidi").toLowerCase() === status
-      );
-      return acc;
-    }, {});
-  }, [filteredClients]);
-
-  async function handleStatusChange(clientId, newStatus) {
-    setBusyId(clientId);
-    await onUpdateStatus(clientId, newStatus);
-    setBusyId("");
-  }
-
-  async function moveLeft(client) {
-    const currentIndex = STATUS_OPTIONS.indexOf((client.status || "liidi").toLowerCase());
-    if (currentIndex <= 0) return;
-    await handleStatusChange(client.id, STATUS_OPTIONS[currentIndex - 1]);
-  }
-
-  async function moveRight(client) {
-    const currentIndex = STATUS_OPTIONS.indexOf((client.status || "liidi").toLowerCase());
-    if (currentIndex === -1 || currentIndex >= STATUS_OPTIONS.length - 1) return;
-    await handleStatusChange(client.id, STATUS_OPTIONS[currentIndex + 1]);
-  }
-
-  return (
-    <div style={{ display: "grid", gap: 22 }}>
-      <SectionTitle
-        title="Toimiva Kanban"
-        description="Siirrä asiakkaita myyntivaiheesta toiseen. Status päivittyy suoraan clients-tauluun."
-      />
-
-      <Panel title="Kanban-ohjaus">
-        <div style={toolbarStyle}>
-          <div style={toolbarLeftStyle}>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} style={searchInputStyle} placeholder="Hae nimellä, yrityksellä, sähköpostilla, puhelimella tai seuraavalla toimenpiteellä" />
-            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={filterSelectStyle}>
-              <option value="kaikki">Kaikki statukset</option>
-              {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
-            </select>
-          </div>
-          <div style={{ color: "#94a3b8", fontSize: 14 }}>{loading ? "Ladataan..." : `${filteredClients.length} casea`}</div>
-        </div>
-
-        <div style={kanbanBoardStyle}>
-          {STATUS_OPTIONS.map((status) => {
-            const items = grouped[status] || [];
-            const total = items.reduce((sum, item) => sum + Number(item.value || 0), 0);
-
-            return (
-              <div key={status} style={{ ...kanbanColumnStyle, borderTop: `3px solid ${STATUS_COLORS[status] || "#64748b"}` }}>
-                <div style={kanbanColumnHeaderStyle}>
-                  <div>
-                    <div style={{ fontSize: 20, fontWeight: 800, textTransform: "capitalize" }}>{status}</div>
-                    <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 4 }}>
-                      {items.length} kpl · {formatCurrency(total)}
-                    </div>
-                  </div>
-                  <div style={{ width: 14, height: 14, borderRadius: "50%", background: STATUS_COLORS[status] || "#64748b", flexShrink: 0 }} />
-                </div>
-
-                <div style={kanbanCardsWrapStyle}>
-                  {loading ? (
-                    <EmptyText text="Ladataan..." />
-                  ) : items.length === 0 ? (
-                    <div style={emptyKanbanCardStyle}>Ei caseja tässä vaiheessa</div>
-                  ) : (
-                    items.map((client) => {
-                      const currentIndex = STATUS_OPTIONS.indexOf((client.status || "liidi").toLowerCase());
-
-                      return (
-                        <div key={client.id} style={kanbanCardStyle}>
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                            <div>
-                              <div style={kanbanCardTitleStyle}>{client.name || "Nimetön asiakas"}</div>
-                              <div style={kanbanCardCompanyStyle}>{client.company || "Ei yritystä"}</div>
-                            </div>
-                            <span style={{ ...statusBadgeStyle, background: STATUS_COLORS[client.status] || "#64748b", height: "fit-content" }}>
-                              {client.status || "-"}
-                            </span>
-                          </div>
-
-                          <div style={kanbanMetaGridStyle}>
-                            <div>
-                              <div style={kanbanMetaLabelStyle}>Arvo</div>
-                              <div style={kanbanMetaValueStyle}>{formatCurrency(client.value)}</div>
-                            </div>
-                            <div>
-                              <div style={kanbanMetaLabelStyle}>Tod. %</div>
-                              <div style={kanbanMetaValueStyle}>{formatPercent(client.probability)}</div>
-                            </div>
-                          </div>
-
-                          <div style={kanbanInfoLineStyle}><strong>Seuraava:</strong> {client.next_action || "-"}</div>
-                          <div style={kanbanInfoLineStyle}><strong>Päivä:</strong> {formatDate(client.next_action_date)}</div>
-                          <div style={kanbanInfoLineStyle}><strong>Puhelin:</strong> {client.phone || "-"}</div>
-                          <div style={kanbanInfoLineStyle}><strong>Sähköposti:</strong> {client.email || "-"}</div>
-
-                          <div style={kanbanLinksStyle}>
-                            {client.company_linkedin ? <a href={safeUrl(client.company_linkedin)} target="_blank" rel="noreferrer" style={linkButtonStyle}>LinkedIn</a> : null}
-                            {client.quote_link ? <a href={safeUrl(client.quote_link)} target="_blank" rel="noreferrer" style={linkButtonStyle}>Tarjous</a> : null}
-                          </div>
-
-                          <div style={{ marginTop: 12 }}>
-                            <select
-                              value={client.status || "liidi"}
-                              onChange={(e) => handleStatusChange(client.id, e.target.value)}
-                              style={kanbanSelectStyle}
-                              disabled={busyId === client.id}
-                            >
-                              {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          </div>
-
-                          <div style={kanbanButtonsRowStyle}>
-                            <button
-                              type="button"
-                              style={{ ...kanbanMoveButtonStyle, opacity: currentIndex <= 0 || busyId === client.id ? 0.45 : 1 }}
-                              onClick={() => moveLeft(client)}
-                              disabled={currentIndex <= 0 || busyId === client.id}
-                            >
-                              ← Edellinen
-                            </button>
-                            <button
-                              type="button"
-                              style={{ ...kanbanMoveButtonStyle, opacity: currentIndex >= STATUS_OPTIONS.length - 1 || busyId === client.id ? 0.45 : 1 }}
-                              onClick={() => moveRight(client)}
-                              disabled={currentIndex >= STATUS_OPTIONS.length - 1 || busyId === client.id}
-                            >
-                              Seuraava →
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function QuotesView({ loading, clients, quotes, quoteLines, onCreate, onUpdate, onDelete }) {
-  const [form, setForm] = useState(emptyQuoteForm);
-  const [editingId, setEditingId] = useState("");
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("kaikki");
-  const [submitting, setSubmitting] = useState(false);
-
-  const clientById = useMemo(() => {
-    const map = {};
-    clients.forEach((client) => {
-      map[client.id] = client;
-    });
-    return map;
-  }, [clients]);
-
-  const linesByQuoteId = useMemo(() => {
-    const map = {};
-    quoteLines.forEach((line) => {
-      if (!map[line.quote_id]) map[line.quote_id] = [];
-      map[line.quote_id].push(line);
-    });
-    return map;
-  }, [quoteLines]);
-
-  const filteredQuotes = useMemo(() => {
-    return quotes.filter((quote) => {
-      const client = clientById[quote.client_id];
-      const q = search.trim().toLowerCase();
-
-      const matchesSearch =
-        !q ||
-        (quote.quote_number || "").toLowerCase().includes(q) ||
-        (quote.title || "").toLowerCase().includes(q) ||
-        (quote.description || "").toLowerCase().includes(q) ||
-        (client?.name || "").toLowerCase().includes(q) ||
-        (client?.company || "").toLowerCase().includes(q);
-
-      const matchesStatus =
-        statusFilter === "kaikki" || (quote.status || "").toLowerCase() === statusFilter;
-
-      return matchesSearch && matchesStatus;
-    });
-  }, [quotes, clientById, search, statusFilter]);
-
-  const computedTotals = useMemo(() => {
-    return computeQuoteTotals(form.lines, Number(form.vat_percent || 0));
-  }, [form.lines, form.vat_percent]);
-
-  function updateField(field, value) {
-    setForm((prev) => ({ ...prev, [field]: value }));
-  }
-
-  function updateLine(index, field, value) {
-    setForm((prev) => {
-      const nextLines = [...prev.lines];
-      nextLines[index] = { ...nextLines[index], [field]: value };
-      return { ...prev, lines: nextLines };
-    });
-  }
-
-  function addLine() {
-    setForm((prev) => ({ ...prev, lines: [...prev.lines, createEmptyQuoteLine()] }));
-  }
-
-  function removeLine(index) {
-    setForm((prev) => {
-      if (prev.lines.length === 1) {
-        return { ...prev, lines: [createEmptyQuoteLine()] };
-      }
-      return { ...prev, lines: prev.lines.filter((_, i) => i !== index) };
-    });
-  }
-
-  function cancelEdit() {
-    setEditingId("");
-    setForm(emptyQuoteForm);
-  }
-
-  function startEdit(quote) {
-    const lines = (linesByQuoteId[quote.id] || []).map((line) => ({
-      service_name: line.service_name || "",
-      description: line.description || "",
-      quantity: Number(line.quantity || 1),
-      unit: line.unit || "kpl",
-      unit_price: Number(line.unit_price || 0),
-    }));
-
-    setEditingId(quote.id);
-    setForm({
-      client_id: quote.client_id || "",
-      title: quote.title || "",
-      description: quote.description || "",
-      status: quote.status || "luonnos",
-      quote_date: quote.quote_date || "",
-      valid_until: quote.valid_until || "",
-      vat_percent: Number(quote.vat_percent || 25.5),
-      payment_terms: quote.payment_terms || "",
-      delivery_terms: quote.delivery_terms || "",
-      pdf_link: quote.pdf_link || "",
-      notes: quote.notes || "",
-      lines: lines.length > 0 ? lines : [createEmptyQuoteLine()],
-    });
-
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setSubmitting(true);
-
-    const result = editingId
-      ? await onUpdate(editingId, form)
-      : await onCreate(form);
-
-    setSubmitting(false);
-
-    if (result?.ok) {
-      setEditingId("");
-      setForm(emptyQuoteForm);
-    }
-  }
-
-  return (
-    <div style={{ display: "grid", gap: 22 }}>
-      <SectionTitle
-        title="Toimiva Tarjoukset-näkymä"
-        description="Luo, muokkaa ja hallitse tarjouksia. Tarjoukset kytkeytyvät suoraan asiakkaisiin ja tarjousriveihin."
-      />
-
-      <Panel title={editingId ? "Muokkaa tarjousta" : "Luo uusi tarjous"}>
-        <form onSubmit={handleSubmit}>
-          <div style={crmFormGrid}>
-            <Field label="Asiakas" help="Valitse CRM:stä">
-              <select
-                value={form.client_id}
-                onChange={(e) => updateField("client_id", e.target.value)}
-                style={inputStyle}
-              >
-                <option value="">Valitse asiakas</option>
-                {clients.map((client) => (
-                  <option key={client.id} value={client.id}>
-                    {client.name || "-"} {client.company ? `· ${client.company}` : ""}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="Tarjouksen otsikko" help="Pakollinen">
-              <input
-                value={form.title}
-                onChange={(e) => updateField("title", e.target.value)}
-                style={inputStyle}
-                placeholder="Esim. Dronella lämpökuvaus"
-              />
-            </Field>
-
-            <Field label="Status" help="Tarjouksen tila">
-              <select
-                value={form.status}
-                onChange={(e) => updateField("status", e.target.value)}
-                style={inputStyle}
-              >
-                {QUOTE_STATUS_OPTIONS.map((status) => (
-                  <option key={status} value={status}>
-                    {status}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="ALV %" help="Oletus 25,5">
-              <input
-                type="number"
-                value={form.vat_percent}
-                onChange={(e) => updateField("vat_percent", e.target.value)}
-                style={inputStyle}
-                placeholder="25.5"
-              />
-            </Field>
-
-            <Field label="Tarjouspäivä" help="Tarjouksen päiväys">
-              <input
-                type="date"
-                value={form.quote_date}
-                onChange={(e) => updateField("quote_date", e.target.value)}
-                style={inputStyle}
-              />
-            </Field>
-
-            <Field label="Voimassa asti" help="Tarjouksen voimassaoloaika">
-              <input
-                type="date"
-                value={form.valid_until}
-                onChange={(e) => updateField("valid_until", e.target.value)}
-                style={inputStyle}
-              />
-            </Field>
-
-            <Field label="Maksuehto" help="Esim. 14 pv netto">
-              <input
-                value={form.payment_terms}
-                onChange={(e) => updateField("payment_terms", e.target.value)}
-                style={inputStyle}
-                placeholder="14 pv netto"
-              />
-            </Field>
-
-            <Field label="Toimitusehto" help="Tarvittaessa">
-              <input
-                value={form.delivery_terms}
-                onChange={(e) => updateField("delivery_terms", e.target.value)}
-                style={inputStyle}
-                placeholder="Toimitus sopimuksen mukaan"
-              />
-            </Field>
-
-            <Field label="PDF-linkki" help="Valinnainen">
-              <input
-                value={form.pdf_link}
-                onChange={(e) => updateField("pdf_link", e.target.value)}
-                style={inputStyle}
-                placeholder="https://..."
-              />
-            </Field>
-
-            <Field label="Lyhyt kuvaus" help="Mitä tarjous koskee">
-              <input
-                value={form.description}
-                onChange={(e) => updateField("description", e.target.value)}
-                style={inputStyle}
-                placeholder="Kuvaus kohteesta"
-              />
-            </Field>
-          </div>
-
-          <div style={{ marginTop: 16 }}>
-            <Field label="Lisähuomiot" help="Sisäiset tai tarjoukseen liittyvät huomiot">
-              <textarea
-                value={form.notes}
-                onChange={(e) => updateField("notes", e.target.value)}
-                style={textareaStyle}
-                placeholder="Kirjaa tähän lisätiedot"
-              />
-            </Field>
-          </div>
-
-          <div style={{ marginTop: 24 }}>
-            <div style={subSectionTitleStyle}>Tarjousrivit</div>
-
-            <div style={quoteLinesWrapStyle}>
-              {form.lines.map((line, index) => {
-                const lineTotal = Number(line.quantity || 0) * Number(line.unit_price || 0);
-
-                return (
-                  <div key={index} style={quoteLineCardStyle}>
-                    <div style={quoteLineGridStyle}>
-                      <Field label="Palvelu" help="Rivin nimi">
-                        <input
-                          value={line.service_name}
-                          onChange={(e) => updateLine(index, "service_name", e.target.value)}
-                          style={inputStyle}
-                          placeholder="Esim. Virtuaalikuvaus"
-                        />
-                      </Field>
-
-                      <Field label="Kuvaus" help="Tarkempi sisältö">
-                        <input
-                          value={line.description}
-                          onChange={(e) => updateLine(index, "description", e.target.value)}
-                          style={inputStyle}
-                          placeholder="Kuvaus rivistä"
-                        />
-                      </Field>
-
-                      <Field label="Määrä" help="Lukumäärä">
-                        <input
-                          type="number"
-                          value={line.quantity}
-                          onChange={(e) => updateLine(index, "quantity", e.target.value)}
-                          style={inputStyle}
-                          placeholder="1"
-                        />
-                      </Field>
-
-                      <Field label="Yksikkö" help="Esim. kpl, h, m²">
-                        <input
-                          value={line.unit}
-                          onChange={(e) => updateLine(index, "unit", e.target.value)}
-                          style={inputStyle}
-                          placeholder="kpl"
-                        />
-                      </Field>
-
-                      <Field label="Yksikköhinta €" help="ALV 0 %">
-                        <input
-                          type="number"
-                          value={line.unit_price}
-                          onChange={(e) => updateLine(index, "unit_price", e.target.value)}
-                          style={inputStyle}
-                          placeholder="0"
-                        />
-                      </Field>
-
-                      <Field label="Rivisumma" help="Lasketaan automaattisesti">
-                        <div style={readonlyBoxStyle}>{formatCurrency(lineTotal)}</div>
-                      </Field>
-                    </div>
-
-                    <div style={{ marginTop: 12 }}>
-                      <button type="button" style={miniDeleteButtonStyle} onClick={() => removeLine(index)}>
-                        Poista rivi
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              <button type="button" style={secondaryButtonStyle} onClick={addLine}>
-                Lisää rivi
-              </button>
-            </div>
-          </div>
-
-          <div style={quoteTotalsBarStyle}>
-            <div style={quoteTotalItemStyle}>
-              <div style={quoteTotalLabelStyle}>Välisummaa</div>
-              <div style={quoteTotalValueStyle}>{formatCurrency(computedTotals.subtotal)}</div>
-            </div>
-            <div style={quoteTotalItemStyle}>
-              <div style={quoteTotalLabelStyle}>ALV</div>
-              <div style={quoteTotalValueStyle}>{formatCurrency(computedTotals.vatAmount)}</div>
-            </div>
-            <div style={quoteTotalItemStyle}>
-              <div style={quoteTotalLabelStyle}>Yhteensä</div>
-              <div style={quoteTotalGrandStyle}>{formatCurrency(computedTotals.total)}</div>
-            </div>
-          </div>
-
-          <div style={buttonRowStyle}>
-            <button type="submit" style={primaryButtonStyle} disabled={submitting}>
-              {submitting ? "Tallennetaan..." : editingId ? "Tallenna tarjous" : "Luo tarjous"}
-            </button>
-
-            {editingId ? (
-              <button type="button" style={secondaryButtonStyle} onClick={cancelEdit}>
-                Peru muokkaus
-              </button>
-            ) : null}
-          </div>
-        </form>
-      </Panel>
-
-      <Panel title="Tarjousarkisto">
-        <div style={toolbarStyle}>
-          <div style={toolbarLeftStyle}>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={searchInputStyle}
-              placeholder="Hae tarjousnumerolla, otsikolla tai asiakkaalla"
-            />
-
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              style={filterSelectStyle}
-            >
-              <option value="kaikki">Kaikki statukset</option>
-              {QUOTE_STATUS_OPTIONS.map((status) => (
-                <option key={status} value={status}>
-                  {status}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={{ color: "#94a3b8", fontSize: 14 }}>
-            {loading ? "Ladataan..." : `${filteredQuotes.length} tarjousta`}
-          </div>
-        </div>
-
-        <div style={{ overflowX: "auto" }}>
-          <table style={tableStyle}>
-            <thead>
-              <tr>
                 {[
-                  "Numero",
-                  "Asiakas",
-                  "Otsikko",
+                  "Nimi",
+                  "Yritys",
                   "Status",
+                  "Arvo",
+                  "Tod. %",
+                  "Seuraava toimenpide",
                   "Päivä",
-                  "Voimassa",
-                  "Netto",
-                  "ALV",
-                  "Yhteensä",
-                  "PDF",
+                  "Viim. kontakti",
+                  "LinkedIn",
+                  "Tarjous",
                   "Toiminnot",
                 ].map((h) => (
                   <th key={h} style={thStyle}>
@@ -1356,62 +696,83 @@ function QuotesView({ loading, clients, quotes, quoteLines, onCreate, onUpdate, 
               {loading ? (
                 <tr>
                   <td colSpan={11} style={emptyRowStyle}>
-                    Ladataan tarjouksia...
+                    Ladataan asiakkaita...
                   </td>
                 </tr>
-              ) : filteredQuotes.length === 0 ? (
+              ) : filteredClients.length === 0 ? (
                 <tr>
                   <td colSpan={11} style={emptyRowStyle}>
-                    Ei tarjouksia valituilla hakuehdoilla.
+                    Ei osumia valituilla hakuehdoilla.
                   </td>
                 </tr>
               ) : (
-                filteredQuotes.map((quote) => {
-                  const client = clientById[quote.client_id];
-                  return (
-                    <tr key={quote.id}>
-                      <td style={tdStyleStrong}>{quote.quote_number || "-"}</td>
-                      <td style={tdStyle}>
-                        {client ? `${client.name || "-"}${client.company ? ` · ${client.company}` : ""}` : "-"}
-                      </td>
-                      <td style={tdStyle}>{quote.title || "-"}</td>
-                      <td style={tdStyle}>
-                        <span
-                          style={{
-                            ...statusBadgeStyle,
-                            background: QUOTE_STATUS_COLORS[quote.status] || "#64748b",
-                          }}
+                filteredClients.map((client) => (
+                  <tr key={client.id}>
+                    <td style={tdStyleStrong}>{client.name || "-"}</td>
+                    <td style={tdStyle}>{client.company || "-"}</td>
+                    <td style={tdStyle}>
+                      <span
+                        style={{
+                          ...statusBadgeStyle,
+                          background: STATUS_COLORS[client.status] || "#64748b",
+                        }}
+                      >
+                        {client.status || "-"}
+                      </span>
+                    </td>
+                    <td style={tdStyle}>{formatCurrency(client.value)}</td>
+                    <td style={tdStyle}>{formatPercent(client.probability)}</td>
+                    <td style={tdStyle}>{client.next_action || "-"}</td>
+                    <td style={tdStyle}>{formatDate(client.next_action_date)}</td>
+                    <td style={tdStyle}>{formatDate(client.last_contact_date)}</td>
+                    <td style={tdStyle}>
+                      {client.company_linkedin ? (
+                        <a
+                          href={safeUrl(client.company_linkedin)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={linkButtonStyle}
                         >
-                          {quote.status || "-"}
-                        </span>
-                      </td>
-                      <td style={tdStyle}>{formatDate(quote.quote_date)}</td>
-                      <td style={tdStyle}>{formatDate(quote.valid_until)}</td>
-                      <td style={tdStyle}>{formatCurrency(quote.subtotal)}</td>
-                      <td style={tdStyle}>{formatCurrency(quote.vat_amount)}</td>
-                      <td style={tdStyle}>{formatCurrency(quote.total_amount)}</td>
-                      <td style={tdStyle}>
-                        {quote.pdf_link ? (
-                          <a href={safeUrl(quote.pdf_link)} target="_blank" rel="noreferrer" style={linkButtonStyle}>
-                            Avaa
-                          </a>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td style={tdStyle}>
-                        <div style={rowButtonsStyle}>
-                          <button type="button" style={miniActionButtonStyle} onClick={() => startEdit(quote)}>
-                            Muokkaa
-                          </button>
-                          <button type="button" style={miniDeleteButtonStyle} onClick={() => onDelete(quote.id, quote.quote_number || quote.title)}>
-                            Poista
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
+                          Avaa
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td style={tdStyle}>
+                      {client.quote_link ? (
+                        <a
+                          href={safeUrl(client.quote_link)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={linkButtonStyle}
+                        >
+                          Tarjous
+                        </a>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                    <td style={tdStyle}>
+                      <div style={rowButtonsStyle}>
+                        <button
+                          onClick={() => startEdit(client)}
+                          style={miniActionButtonStyle}
+                          type="button"
+                        >
+                          Muokkaa
+                        </button>
+                        <button
+                          onClick={() => onDelete(client.id, client.name || client.company)}
+                          style={miniDeleteButtonStyle}
+                          type="button"
+                        >
+                          Poista
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
               )}
             </tbody>
           </table>
@@ -1430,17 +791,57 @@ function FinanceView({ loading, data }) {
       />
 
       <div style={metricsGrid}>
-        <MetricCard title="Kassasaldo" value={loading ? "…" : formatCurrency(data.cashBalance)} color="#14b8a6" subtext="Viimeisin raportti" />
-        <MetricCard title="Saamiset" value={loading ? "…" : formatCurrency(data.latestFinance?.receivables)} color="#3b82f6" subtext="Viimeisin finance_monthly" />
-        <MetricCard title="Velat" value={loading ? "…" : formatCurrency(data.latestFinance?.liabilities)} color="#ef4444" subtext="Viimeisin finance_monthly" />
-        <MetricCard title="Oma pääoma" value={loading ? "…" : formatCurrency(data.latestFinance?.equity)} color="#eab308" subtext="Viimeisin finance_monthly" />
+        <MetricCard
+          title="Kassasaldo"
+          value={loading ? "…" : formatCurrency(data.cashBalance)}
+          color="#14b8a6"
+          subtext="Viimeisin raportti"
+        />
+        <MetricCard
+          title="Saamiset"
+          value={loading ? "…" : formatCurrency(data.latestFinance?.receivables)}
+          color="#3b82f6"
+          subtext="Viimeisin finance_monthly"
+        />
+        <MetricCard
+          title="Velat"
+          value={loading ? "…" : formatCurrency(data.latestFinance?.liabilities)}
+          color="#ef4444"
+          subtext="Viimeisin finance_monthly"
+        />
+        <MetricCard
+          title="Oma pääoma"
+          value={loading ? "…" : formatCurrency(data.latestFinance?.equity)}
+          color="#eab308"
+          subtext="Viimeisin finance_monthly"
+        />
       </div>
 
       <div style={metricsGrid}>
-        <MetricCard title="Tulossa sisään 30 pv" value={loading ? "…" : formatCurrency(data.incoming30d)} color="#22c55e" subtext="cashflow_events" />
-        <MetricCard title="Lähdössä ulos 30 pv" value={loading ? "…" : formatCurrency(data.outgoing30d)} color="#f97316" subtext="cashflow_events" />
-        <MetricCard title="Netto 30 pv" value={loading ? "…" : formatCurrency(data.net30d)} color="#38bdf8" subtext="Sisään – ulos" />
-        <MetricCard title="Myöhässä saamiset" value={loading ? "…" : formatCurrency(data.overdueReceivables)} color="#ef4444" subtext="Erääntyneet forecast/invoiced" />
+        <MetricCard
+          title="Tulossa sisään 30 pv"
+          value={loading ? "…" : formatCurrency(data.incoming30d)}
+          color="#22c55e"
+          subtext="cashflow_events"
+        />
+        <MetricCard
+          title="Lähdössä ulos 30 pv"
+          value={loading ? "…" : formatCurrency(data.outgoing30d)}
+          color="#f97316"
+          subtext="cashflow_events"
+        />
+        <MetricCard
+          title="Netto 30 pv"
+          value={loading ? "…" : formatCurrency(data.net30d)}
+          color="#38bdf8"
+          subtext="Sisään – ulos"
+        />
+        <MetricCard
+          title="Myöhässä saamiset"
+          value={loading ? "…" : formatCurrency(data.overdueReceivables)}
+          color="#ef4444"
+          subtext="Erääntyneet forecast/invoiced"
+        />
       </div>
 
       <Panel title="Finance-monthly yhteenveto">
@@ -1461,7 +862,7 @@ function PlaceholderView({ title, text }) {
   return (
     <Panel title={title}>
       <PanelHint text={text} />
-      <EmptyText text="Tämä näkymä jätettiin tarkoituksella rungoksi, jotta ensin saatiin dashboard, CRM, Kanban ja tarjoukset oikeasti käyttöön." />
+      <EmptyText text="Tämä näkymä jätettiin tarkoituksella rungoksi, jotta ensin saatiin dashboard ja CRM oikeasti käyttöön." />
     </Panel>
   );
 }
@@ -1625,26 +1026,6 @@ function normalizeClientPayload(form) {
   };
 }
 
-function computeQuoteTotals(lines, vatPercent) {
-  const subtotal = lines.reduce((sum, line) => {
-    return sum + Number(line.quantity || 0) * Number(line.unit_price || 0);
-  }, 0);
-
-  const vatAmount = subtotal * (Number(vatPercent || 0) / 100);
-  const total = subtotal + vatAmount;
-
-  return { subtotal, vatAmount, total };
-}
-
-function buildQuoteNumber() {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  const randomPart = Math.floor(Math.random() * 9000 + 1000);
-  return `TARJ-${y}${m}${d}-${randomPart}`;
-}
-
 function safeUrl(url) {
   if (!url) return null;
   if (url.startsWith("http://") || url.startsWith("https://")) return url;
@@ -1685,7 +1066,12 @@ function PanelHint({ text }) {
 
 function MetricCard({ title, value, color, subtext }) {
   return (
-    <div style={{ ...metricCardStyle, border: `2px solid ${color}` }}>
+    <div
+      style={{
+        ...metricCardStyle,
+        border: `2px solid ${color}`,
+      }}
+    >
       <div style={{ fontSize: 15, color: "#94a3b8", marginBottom: 14 }}>{title}</div>
       <div style={{ fontSize: 36, fontWeight: 800, lineHeight: 1.05 }}>{value}</div>
       <div style={{ marginTop: 10, color: "#64748b", fontSize: 13 }}>{subtext}</div>
@@ -1704,7 +1090,15 @@ function MiniMetric({ title, value }) {
 
 function ReminderCard({ color, title, subtitle, line1, line2, line3 }) {
   return (
-    <div style={{ background: "#0b0f19", border: "1px solid #2a3144", borderLeft: `5px solid ${color}`, borderRadius: 14, padding: 16 }}>
+    <div
+      style={{
+        background: "#0b0f19",
+        border: "1px solid #2a3144",
+        borderLeft: `5px solid ${color}`,
+        borderRadius: 14,
+        padding: 16,
+      }}
+    >
       <div style={{ fontSize: 18, fontWeight: 700 }}>{title}</div>
       <div style={{ color: "#d1d5db", marginTop: 4 }}>{subtitle}</div>
       <div style={{ color: "#9ca3af", marginTop: 6 }}>{line1}</div>
@@ -1716,10 +1110,20 @@ function ReminderCard({ color, title, subtitle, line1, line2, line3 }) {
 
 function TaskCard({ task, clientName }) {
   return (
-    <div style={{ background: "#0b0f19", border: "1px solid #2a3144", borderLeft: `5px solid ${TASK_PRIORITY_COLORS[task.priority] || "#64748b"}`, borderRadius: 14, padding: 14 }}>
+    <div
+      style={{
+        background: "#0b0f19",
+        border: "1px solid #2a3144",
+        borderLeft: `5px solid ${TASK_PRIORITY_COLORS[task.priority] || "#64748b"}`,
+        borderRadius: 14,
+        padding: 14,
+      }}
+    >
       <div style={{ fontSize: 17, fontWeight: 700 }}>{task.title || "-"}</div>
       <div style={{ color: "#d1d5db", marginTop: 4 }}>Asiakas: {clientName || "-"}</div>
-      <div style={{ color: "#9ca3af", marginTop: 4 }}>Tyyppi: {task.task_type || "-"} · Prioriteetti: {task.priority || "-"}</div>
+      <div style={{ color: "#9ca3af", marginTop: 4 }}>
+        Tyyppi: {task.task_type || "-"} · Prioriteetti: {task.priority || "-"}
+      </div>
       <div style={{ color: "#9ca3af", marginTop: 4 }}>Deadline: {formatDate(task.due_date)}</div>
       <div style={{ color: "#9ca3af", marginTop: 4 }}>Muistiinpano: {task.notes || "-"}</div>
     </div>
@@ -1891,4 +1295,218 @@ const panelStyle = {
   border: "1px solid rgba(231,223,178,0.10)",
   borderRadius: 22,
   padding: 22,
-  boxShadow: "0 16px 50px rgba(0,0,0,
+  boxShadow: "0 16px 50px rgba(0,0,0,0.24)",
+};
+
+const panelHintStyle = {
+  color: "#94a3b8",
+  fontSize: 13,
+  marginBottom: 16,
+  padding: "10px 12px",
+  background: "rgba(255,255,255,0.03)",
+  border: "1px solid #243047",
+  borderRadius: 12,
+};
+
+const metricCardStyle = {
+  background: "linear-gradient(180deg, rgba(17,21,34,0.98), rgba(11,15,25,0.98))",
+  borderRadius: 18,
+  padding: 22,
+  minHeight: 128,
+  boxShadow: "0 14px 30px rgba(0,0,0,0.25)",
+};
+
+const miniMetricStyle = {
+  background: "#0b0f19",
+  border: "1px solid #22304a",
+  borderRadius: 14,
+  padding: 14,
+};
+
+const crmFormGrid = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(220px, 1fr))",
+  gap: 16,
+};
+
+const fieldLabelStyle = {
+  fontSize: 13,
+  fontWeight: 700,
+  color: "#e5e7eb",
+  marginBottom: 6,
+};
+
+const fieldHelpStyle = {
+  fontSize: 12,
+  color: "#94a3b8",
+  marginBottom: 8,
+};
+
+const inputStyle = {
+  width: "100%",
+  padding: 14,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#f8fafc",
+  color: "#111827",
+  boxSizing: "border-box",
+};
+
+const textareaStyle = {
+  width: "100%",
+  minHeight: 110,
+  padding: 14,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#f8fafc",
+  color: "#111827",
+  boxSizing: "border-box",
+  resize: "vertical",
+};
+
+const buttonRowStyle = {
+  display: "flex",
+  gap: 12,
+  marginTop: 18,
+  flexWrap: "wrap",
+};
+
+const primaryButtonStyle = {
+  padding: "12px 18px",
+  fontSize: 15,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#0f766e",
+  color: "white",
+  border: "none",
+  borderRadius: 12,
+};
+
+const secondaryButtonStyle = {
+  padding: "12px 18px",
+  fontSize: 15,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#1f2937",
+  color: "white",
+  border: "1px solid #374151",
+  borderRadius: 12,
+};
+
+const toolbarStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 12,
+  marginBottom: 18,
+  flexWrap: "wrap",
+};
+
+const toolbarLeftStyle = {
+  display: "flex",
+  gap: 12,
+  flexWrap: "wrap",
+  flex: 1,
+};
+
+const searchInputStyle = {
+  minWidth: 340,
+  padding: 12,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#0b0f19",
+  color: "#f8fafc",
+};
+
+const filterSelectStyle = {
+  minWidth: 220,
+  padding: 12,
+  fontSize: 15,
+  borderRadius: 12,
+  border: "1px solid #334155",
+  background: "#0b0f19",
+  color: "#f8fafc",
+};
+
+const tableStyle = {
+  width: "100%",
+  borderCollapse: "collapse",
+};
+
+const thStyle = {
+  textAlign: "left",
+  padding: 12,
+  borderBottom: "1px solid #2a3144",
+  color: "#d9dbe3",
+  whiteSpace: "nowrap",
+  fontSize: 13,
+};
+
+const tdStyle = {
+  padding: 12,
+  borderBottom: "1px solid #22293a",
+  whiteSpace: "nowrap",
+  fontSize: 14,
+  color: "#e5e7eb",
+  verticalAlign: "top",
+};
+
+const tdStyleStrong = {
+  ...tdStyle,
+  fontWeight: 700,
+};
+
+const emptyRowStyle = {
+  padding: 16,
+  color: "#94a3b8",
+  borderBottom: "1px solid #22293a",
+};
+
+const statusBadgeStyle = {
+  color: "white",
+  padding: "4px 10px",
+  borderRadius: 999,
+  fontSize: 13,
+  fontWeight: 700,
+};
+
+const rowButtonsStyle = {
+  display: "flex",
+  gap: 8,
+  flexWrap: "wrap",
+};
+
+const miniActionButtonStyle = {
+  padding: "8px 10px",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#1d4ed8",
+  color: "white",
+  border: "none",
+  borderRadius: 10,
+};
+
+const miniDeleteButtonStyle = {
+  padding: "8px 10px",
+  fontSize: 13,
+  fontWeight: 700,
+  cursor: "pointer",
+  background: "#b91c1c",
+  color: "white",
+  border: "none",
+  borderRadius: 10,
+};
+
+const linkButtonStyle = {
+  display: "inline-block",
+  padding: "6px 10px",
+  borderRadius: 8,
+  background: "#1d4ed8",
+  color: "white",
+  textDecoration: "none",
+  fontSize: 13,
+  fontWeight: 700,
+};
