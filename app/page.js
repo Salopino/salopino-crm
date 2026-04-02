@@ -321,6 +321,14 @@ export default function Page() {
   const selectedClient = useMemo(() => clients.find((c) => String(c.id) === String(selectedClientId)) || null, [clients, selectedClientId]);
   const selectedQuote = useMemo(() => quotes.find((q) => String(q.id) === String(selectedQuoteId)) || null, [quotes, selectedQuoteId]);
 
+  const financeSummary = useMemo(() => ({
+    revenue: financeMonthly.reduce((s, r) => s + num(r.revenue), 0),
+    expenses: financeMonthly.reduce((s, r) => s + num(r.expenses), 0),
+    profit: financeMonthly.reduce((s, r) => s + num(r.profit !== undefined && r.profit !== null ? r.profit : num(r.revenue) - num(r.expenses)), 0),
+    target: financeMonthly.reduce((s, r) => s + num(r.target), 0),
+    cashflow: cashflowEvents.reduce((s, r) => s + num(r.amount), 0),
+  }), [financeMonthly, cashflowEvents]);
+
   const dashboard = useMemo(() => {
     const quotePipeline = quotes
       .filter((q) => ["Luonnos", "Lähetetty"].includes(q.status))
