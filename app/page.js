@@ -11,7 +11,12 @@ const supabase = createClient(
 const CLIENT_STATUSES = ["Liidi", "Kontaktoitu", "Tarjous", "Neuvottelu", "Voitettu", "Hävitty"];
 const QUOTE_STATUSES = ["Luonnos", "Lähetetty", "Hyväksytty", "Hylätty", "Vanhentunut"];
 const CASHFLOW_TYPES = ["Tulo", "Meno", "Ennuste"];
-const VAT_DEFAULT = 25.5;
+const INVOICE_STATUSES = ["Ei laskutettu", "Laskutettu", "Maksettu"];
+const VALIDITY_PRESETS = ["10", "14", "21", "30", "oma"];
+const CALENDAR_EVENT_TYPES = ["Kuvaus", "Palaveri", "Toimitus", "Seurantakäynti", "Muu"];
+const CALENDAR_EVENT_STATUSES = ["Suunniteltu", "Vahvistettu", "Valmis", "Peruttu"];
+
+const VAT_DEFAULT = 0;
 const MONTHLY_TARGET_DEFAULT = 5000;
 
 const emptyClient = {
@@ -56,7 +61,16 @@ const emptyQuote = {
   status: "Luonnos",
   issue_date: "",
   valid_until: "",
+  quote_valid_days: 14,
+  validityPreset: "14",
   vat_rate: VAT_DEFAULT,
+  is_b2b: true,
+  vat_included: false,
+  payment_terms_days: 14,
+  invoice_status: "Ei laskutettu",
+  invoice_number: "",
+  invoice_date: "",
+  expected_payment_date: "",
   notes: "",
 };
 
@@ -82,12 +96,26 @@ const emptyCashflow = {
 const emptyTemplate = {
   id: null,
   name: "",
+  service_name: "",
   category: "",
   unit: "kpl",
   unit_price: "",
   vat_rate: VAT_DEFAULT,
   is_active: true,
   description: "",
+};
+
+const emptyCalendarEvent = {
+  id: null,
+  client_id: "",
+  quote_id: "",
+  title: "",
+  event_type: "Kuvaus",
+  status: "Suunniteltu",
+  start_at: "",
+  end_at: "",
+  location: "",
+  notes: "",
 };
 
 const eur = (v) =>
@@ -98,16 +126,23 @@ const eur = (v) =>
   }).format(Number(v || 0));
 
 const num = (v) => Number(v || 0);
-
 const fmtDate = (v) => (v ? new Date(v).toLocaleDateString("fi-FI") : "-");
 const fmtDateTime = (v) => (v ? new Date(v).toLocaleString("fi-FI") : "-");
 const today = () => new Date().toISOString().slice(0, 10);
 
-const normClientStatus = (s) =>
-  CLIENT_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Liidi";
+const nowLocalInput = () => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 
-const normQuoteStatus = (s) =>
-  QUOTE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Luonnos";
+const addDays = (dateLike, days) => {
+  if (!dateLike) return "";
+  const d = new Date(dateLike);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + Number(days || 0));
+  return d.toISOString().slice(0, 10);
+};
 
 const ymKey = (dateLike) => {
   if (!dateLike) return "";
@@ -118,14 +153,23 @@ const ymKey = (dateLike) => {
 
 const pct = (value) => `${Math.round(value)}%`;
 
+const normClientStatus = (s) =>
+  CLIENT_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Liidi";
+
+const normQuoteStatus = (s) =>
+  QUOTE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Luonnos";
+
+const normInvoiceStatus = (s) =>
+  INVOICE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Ei laskutettu";
+
 const traffic = (value, target) => {
   if (!target || target <= 0) {
-    return { label: "Ei tavoitetta", color: "#c8c8c8", bg: "rgba(200,200,200,.10)" };
+    return { label: "Ei tavoitetta", color: "#c8c8c8" };
   }
   const ratio = value / target;
-  if (ratio >= 1) return { label: "Vihreä", color: "#ccffe0", bg: "rgba(71,137,94,.18)" };
-  if (ratio >= 0.7) return { label: "Keltainen", color: "#fff1c7", bg: "rgba(217,201,138,.16)" };
-  return { label: "Punainen", color: "#ffd7df", bg: "rgba(120,31,49,.18)" };
+  if (ratio >= 1) return { label: "Vihreä", color: "#ccffe0" };
+  if (ratio >= 0.7) return { label: "Keltainen", color: "#fff1c7" };
+  return { label: "Punainen", color: "#ffd7df" };
 };
 
 const sx = {
@@ -136,7 +180,7 @@ const sx = {
     color: "#f4f1e9",
     fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',
   },
-  wrap: { maxWidth: 1600, margin: "0 auto", padding: "28px 20px 80px" },
+  wrap: { maxWidth: 1700, margin: "0 auto", padding: "28px 20px 80px" },
   card: {
     background: "rgba(18,18,28,.92)",
     border: "1px solid rgba(231,223,178,.10)",
@@ -152,7 +196,6 @@ const sx = {
   hero: {
     background: "linear-gradient(135deg, rgba(29,22,43,.96), rgba(14,12,22,.98))",
     border: "1px solid rgba(231,223,178,.12)",
-
     borderRadius: 26,
     padding: 26,
   },
@@ -166,8 +209,20 @@ const sx = {
     fontSize: 14,
     outline: "none",
   },
-  label: { display: "block", fontSize: 13, fontWeight: 600, color: "rgba(244,241,233,.78)", marginBottom: 7 },
-  btn: { padding: "11px 15px", borderRadius: 12, fontWeight: 700, fontSize: 14, cursor: "pointer" },
+  label: {
+    display: "block",
+    fontSize: 13,
+    fontWeight: 600,
+    color: "rgba(244,241,233,.78)",
+    marginBottom: 7,
+  },
+  btn: {
+    padding: "11px 15px",
+    borderRadius: 12,
+    fontWeight: 700,
+    fontSize: 14,
+    cursor: "pointer",
+  },
   btnPrimary: {
     background: "linear-gradient(135deg, rgba(217,201,138,1), rgba(162,126,56,1))",
     color: "#17120d",
@@ -339,17 +394,27 @@ export default function Page() {
   const [quoteLines, setQuoteLines] = useState([]);
   const [pricingTemplates, setPricingTemplates] = useState([]);
   const [importLogs, setImportLogs] = useState([]);
+  const [calendarEvents, setCalendarEvents] = useState([]);
 
   const [clientForm, setClientForm] = useState(emptyClient);
   const [contactForm, setContactForm] = useState(emptyContact);
   const [taskForm, setTaskForm] = useState(emptyTask);
-  const [quoteForm, setQuoteForm] = useState({ ...emptyQuote, issue_date: today() });
+  const [quoteForm, setQuoteForm] = useState({
+    ...emptyQuote,
+    issue_date: today(),
+    valid_until: addDays(today(), 14),
+  });
   const [quoteDraftLines, setQuoteDraftLines] = useState([
     { id: "d1", description: "", quantity: 1, unit_price: 0, sort_order: 1 },
   ]);
   const [financeForm, setFinanceForm] = useState({ ...emptyFinance, target: MONTHLY_TARGET_DEFAULT });
   const [cashflowForm, setCashflowForm] = useState({ ...emptyCashflow, event_date: today() });
   const [templateForm, setTemplateForm] = useState(emptyTemplate);
+  const [calendarForm, setCalendarForm] = useState({
+    ...emptyCalendarEvent,
+    start_at: nowLocalInput(),
+    end_at: nowLocalInput(),
+  });
 
   const [crmSearch, setCrmSearch] = useState("");
   const [crmStatusFilter, setCrmStatusFilter] = useState("Kaikki");
@@ -359,6 +424,7 @@ export default function Page() {
   const [cashflowFilter, setCashflowFilter] = useState("Kaikki");
   const [templateFilter, setTemplateFilter] = useState("");
   const [importFilter, setImportFilter] = useState("");
+  const [calendarFilter, setCalendarFilter] = useState("");
   const [selectedQuoteId, setSelectedQuoteId] = useState(null);
   const [selectedClientId, setSelectedClientId] = useState(null);
 
@@ -370,6 +436,9 @@ export default function Page() {
     finance: false,
     cashflow: false,
     template: false,
+    calendar: false,
+    generatingQuoteNumber: false,
+    invoicingQuoteId: null,
     deletingClientId: null,
     deletingContactId: null,
     deletingTaskId: null,
@@ -377,14 +446,14 @@ export default function Page() {
     deletingFinanceId: null,
     deletingCashflowId: null,
     deletingTemplateId: null,
+    deletingCalendarId: null,
     kanbanId: null,
   });
-
-  async function loadData() {
+	    async function loadData() {
     setLoading(true);
     setError("");
     try {
-      const [a, b, c, d, e, f, g, h, i] = await Promise.all([
+      const [a, b, c, d, e, f, g, h, i, j] = await Promise.all([
         supabase.from("clients").select("*").order("created_at", { ascending: false }),
         supabase.from("contacts").select("*").order("created_at", { ascending: false }),
         supabase.from("tasks").select("*").order("created_at", { ascending: false }),
@@ -394,9 +463,10 @@ export default function Page() {
         supabase.from("quote_lines").select("*").order("sort_order", { ascending: true }),
         supabase.from("pricing_templates").select("*").order("created_at", { ascending: false }),
         supabase.from("import_logs").select("*").order("imported_at", { ascending: false }),
+        supabase.from("calendar_events").select("*").order("start_at", { ascending: true }),
       ]);
 
-      for (const r of [a, b, c, d, e, f, g, h, i]) {
+      for (const r of [a, b, c, d, e, f, g, h, i, j]) {
         if (r.error) throw r.error;
       }
 
@@ -405,10 +475,15 @@ export default function Page() {
       setTasks(c.data || []);
       setFinanceMonthly(d.data || []);
       setCashflowEvents(e.data || []);
-      setQuotes((f.data || []).map((x) => ({ ...x, status: normQuoteStatus(x.status) })));
+      setQuotes((f.data || []).map((x) => ({
+        ...x,
+        status: normQuoteStatus(x.status),
+        invoice_status: normInvoiceStatus(x.invoice_status),
+      })));
       setQuoteLines(g.data || []);
       setPricingTemplates(h.data || []);
       setImportLogs(i.data || []);
+      setCalendarEvents(j.data || []);
 
       if (!selectedQuoteId && f.data?.length) setSelectedQuoteId(f.data[0].id);
       if (!selectedClientId && a.data?.length) setSelectedClientId(a.data[0].id);
@@ -428,7 +503,8 @@ export default function Page() {
     const t = setTimeout(() => setSuccess(""), 2600);
     return () => clearTimeout(t);
   }, [success]);
-	    const quotesEnriched = useMemo(() => {
+
+  const quotesEnriched = useMemo(() => {
     const clientMap = new Map(clients.map((c) => [c.id, c]));
     return quotes.map((q) => ({
       ...q,
@@ -440,22 +516,28 @@ export default function Page() {
   }, [quotes, quoteLines, clients]);
 
   const clientMap = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients]);
+  const quoteMap = useMemo(() => new Map(quotes.map((q) => [q.id, q])), [quotes]);
+
   const selectedClient = useMemo(
     () => clients.find((c) => c.id === selectedClientId) || null,
     [clients, selectedClientId]
   );
+
   const selectedClientContacts = useMemo(
     () => contacts.filter((x) => x.client_id === selectedClientId),
     [contacts, selectedClientId]
   );
+
   const selectedClientTasks = useMemo(
     () => tasks.filter((x) => x.client_id === selectedClientId),
     [tasks, selectedClientId]
   );
+
   const selectedClientQuotes = useMemo(
     () => quotesEnriched.filter((x) => x.client_id === selectedClientId),
     [quotesEnriched, selectedClientId]
   );
+
   const selectedQuote = useMemo(
     () => quotesEnriched.find((q) => q.id === selectedQuoteId) || null,
     [quotesEnriched, selectedQuoteId]
@@ -529,13 +611,16 @@ export default function Page() {
       .slice(-6)
       .map(([month, amount]) => ({ month, amount }));
 
+    const calendarNext = calendarEvents
+      .filter((x) => x.start_at && new Date(x.start_at) >= new Date())
+      .sort((a, b) => new Date(a.start_at) - new Date(b.start_at))
+      .slice(0, 6);
+
     return {
       totalClients: clients.length,
-      wonClients: clients.filter((c) => String(c.status || "").toLowerCase() === "voitettu")
-        .length,
+      wonClients: clients.filter((c) => String(c.status || "").toLowerCase() === "voitettu").length,
       openTasks,
       overdueTasks,
-      latestMonth,
       latestRevenue,
       latestExpenses,
       latestProfit,
@@ -551,8 +636,9 @@ export default function Page() {
       monthTarget: num(monthTarget),
       monthTraffic,
       forecastRows,
+      calendarNext,
     };
-  }, [clients, tasks, financeMonthly, cashflowEvents, quotes, quotesEnriched]);
+  }, [clients, tasks, financeMonthly, cashflowEvents, quotes, quotesEnriched, calendarEvents]);
 
   const filteredClients = useMemo(() => {
     const q = crmSearch.trim().toLowerCase();
@@ -562,7 +648,8 @@ export default function Page() {
         [c.name, c.company_name, c.email, c.phone, c.city, c.business_id, c.notes]
           .filter(Boolean)
           .some((v) => String(v).toLowerCase().includes(q));
-      const okStatus = crmStatusFilter === "Kaikki" || normClientStatus(c.status) === crmStatusFilter;
+      const okStatus =
+        crmStatusFilter === "Kaikki" || normClientStatus(c.status) === crmStatusFilter;
       return okSearch && okStatus;
     });
   }, [clients, crmSearch, crmStatusFilter]);
@@ -578,7 +665,14 @@ export default function Page() {
     return quotesEnriched.filter((x) => {
       const okSearch =
         !q ||
-        [x.quote_number, x.title, x.notes, x.client?.name, x.client?.company_name]
+        [
+          x.quote_number,
+          x.title,
+          x.notes,
+          x.client?.name,
+          x.client?.company_name,
+          x.invoice_number,
+        ]
           .filter(Boolean)
           .some((v) => String(v).toLowerCase().includes(q));
       const okStatus =
@@ -597,12 +691,18 @@ export default function Page() {
   }, [quoteDraftLines, quoteForm.vat_rate]);
 
   const filteredFinance = useMemo(
-    () => financeMonthly.filter((r) => !financeFilter || String(r.month || "").includes(financeFilter)),
+    () =>
+      financeMonthly.filter(
+        (r) => !financeFilter || String(r.month || "").includes(financeFilter)
+      ),
     [financeMonthly, financeFilter]
   );
 
   const filteredCashflow = useMemo(
-    () => cashflowEvents.filter((r) => cashflowFilter === "Kaikki" || String(r.type || "") === cashflowFilter),
+    () =>
+      cashflowEvents.filter(
+        (r) => cashflowFilter === "Kaikki" || String(r.type || "") === cashflowFilter
+      ),
     [cashflowEvents, cashflowFilter]
   );
 
@@ -611,7 +711,7 @@ export default function Page() {
     return !q
       ? pricingTemplates
       : pricingTemplates.filter((t) =>
-          [t.name, t.category, t.description, t.unit]
+          [t.name, t.service_name, t.category, t.description, t.unit]
             .filter(Boolean)
             .some((v) => String(v).toLowerCase().includes(q))
         );
@@ -627,6 +727,16 @@ export default function Page() {
             .some((v) => String(v).toLowerCase().includes(q))
         );
   }, [importLogs, importFilter]);
+
+  const filteredCalendar = useMemo(() => {
+    const q = calendarFilter.trim().toLowerCase();
+    return calendarEvents.filter((e) => {
+      if (!q) return true;
+      return [e.title, e.event_type, e.status, e.location, e.notes]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(q));
+    });
+  }, [calendarEvents, calendarFilter]);
 
   const financeSummary = useMemo(
     () => ({
@@ -645,13 +755,18 @@ export default function Page() {
     }),
     [filteredFinance, filteredCashflow]
   );
-
-  const resetClient = () => setClientForm(emptyClient);
+	    const resetClient = () => setClientForm(emptyClient);
   const resetContact = () => setContactForm({ ...emptyContact, client_id: selectedClientId || "" });
   const resetTask = () =>
     setTaskForm({ ...emptyTask, client_id: selectedClientId || "", due_date: today() });
   const resetQuote = () => {
-    setQuoteForm({ ...emptyQuote, issue_date: today(), client_id: selectedClientId || "" });
+    const baseDate = today();
+    setQuoteForm({
+      ...emptyQuote,
+      issue_date: baseDate,
+      valid_until: addDays(baseDate, 14),
+      client_id: selectedClientId || "",
+    });
     setQuoteDraftLines([
       { id: `d-${Date.now()}`, description: "", quantity: 1, unit_price: 0, sort_order: 1 },
     ]);
@@ -659,6 +774,13 @@ export default function Page() {
   const resetFinance = () => setFinanceForm({ ...emptyFinance, target: MONTHLY_TARGET_DEFAULT });
   const resetCashflow = () => setCashflowForm({ ...emptyCashflow, event_date: today() });
   const resetTemplate = () => setTemplateForm(emptyTemplate);
+  const resetCalendar = () =>
+    setCalendarForm({
+      ...emptyCalendarEvent,
+      client_id: selectedClientId || "",
+      start_at: nowLocalInput(),
+      end_at: nowLocalInput(),
+    });
 
   function fillClient(c) {
     setClientForm({ ...emptyClient, ...c, status: normClientStatus(c.status) });
@@ -668,6 +790,7 @@ export default function Page() {
   }
 
   function fillQuote(q) {
+    const qvd = q.quote_valid_days ? String(q.quote_valid_days) : "14";
     setQuoteForm({
       id: q.id,
       client_id: q.client_id || "",
@@ -676,7 +799,18 @@ export default function Page() {
       status: normQuoteStatus(q.status),
       issue_date: q.issue_date ? String(q.issue_date).slice(0, 10) : "",
       valid_until: q.valid_until ? String(q.valid_until).slice(0, 10) : "",
-      vat_rate: num(q.vat_rate || VAT_DEFAULT),
+      quote_valid_days: q.quote_valid_days ?? 14,
+      validityPreset: VALIDITY_PRESETS.includes(qvd) ? qvd : "oma",
+      vat_rate: num(q.vat_rate ?? VAT_DEFAULT),
+      is_b2b: q.is_b2b ?? true,
+      vat_included: q.vat_included ?? false,
+      payment_terms_days: q.payment_terms_days ?? 14,
+      invoice_status: normInvoiceStatus(q.invoice_status),
+      invoice_number: q.invoice_number || "",
+      invoice_date: q.invoice_date ? String(q.invoice_date).slice(0, 10) : "",
+      expected_payment_date: q.expected_payment_date
+        ? String(q.expected_payment_date).slice(0, 10)
+        : "",
       notes: q.notes || "",
     });
 
@@ -708,12 +842,64 @@ export default function Page() {
       due_date: t.due_date ? String(t.due_date).slice(0, 10) : "",
     });
   }
-	    async function saveClient(e) {
+
+  function fillCalendar(e) {
+    setCalendarForm({
+      ...emptyCalendarEvent,
+      ...e,
+      start_at: e.start_at ? String(e.start_at).slice(0, 16) : nowLocalInput(),
+      end_at: e.end_at ? String(e.end_at).slice(0, 16) : nowLocalInput(),
+    });
+    setView("calendar");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function generateQuoteNumber() {
+    setBusy((b) => ({ ...b, generatingQuoteNumber: true }));
+    setError("");
+    try {
+      const { data, error } = await supabase.rpc("get_next_quote_number");
+      if (error) throw error;
+      setQuoteForm((prev) => ({ ...prev, quote_number: data || "" }));
+    } catch (err) {
+      setError(err.message || "Tarjousnumeron haku epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, generatingQuoteNumber: false }));
+    }
+  }
+
+  function applyValidityPreset(preset) {
+    if (preset === "oma") {
+      setQuoteForm((prev) => ({
+        ...prev,
+        validityPreset: preset,
+      }));
+      return;
+    }
+    const days = Number(preset);
+    setQuoteForm((prev) => ({
+      ...prev,
+      validityPreset: preset,
+      quote_valid_days: days,
+      valid_until: prev.issue_date ? addDays(prev.issue_date, days) : "",
+    }));
+  }
+
+  function updateIssueDate(date) {
+    setQuoteForm((prev) => {
+      const next = { ...prev, issue_date: date };
+      if (prev.validityPreset !== "oma") {
+        next.valid_until = date ? addDays(date, prev.quote_valid_days || 14) : "";
+      }
+      return next;
+    });
+  }
+
+  async function saveClient(e) {
     e.preventDefault();
     setBusy((b) => ({ ...b, client: true }));
     setError("");
     setSuccess("");
-
     try {
       const payload = {
         name: clientForm.name?.trim() || null,
@@ -729,7 +915,6 @@ export default function Page() {
         linkedin_url: clientForm.linkedin_url?.trim() || null,
         updated_at: new Date().toISOString(),
       };
-
       if (!payload.name) throw new Error("Asiakkaan nimi on pakollinen.");
 
       const r = clientForm.id
@@ -760,7 +945,6 @@ export default function Page() {
     setBusy((b) => ({ ...b, deletingClientId: id }));
     setError("");
     setSuccess("");
-
     try {
       const r = await supabase.from("clients").delete().eq("id", id);
       if (r.error) throw r.error;
@@ -781,13 +965,11 @@ export default function Page() {
     setBusy((b) => ({ ...b, kanbanId: id }));
     setError("");
     setSuccess("");
-
     try {
       const r = await supabase
         .from("clients")
         .update({ status, updated_at: new Date().toISOString() })
         .eq("id", id);
-
       if (r.error) throw r.error;
 
       setClients((prev) => prev.map((c) => (c.id === id ? { ...c, status } : c)));
@@ -804,7 +986,6 @@ export default function Page() {
     setBusy((b) => ({ ...b, contact: true }));
     setError("");
     setSuccess("");
-
     try {
       if (!contactForm.client_id) throw new Error("Valitse asiakas kontaktille.");
       if (!contactForm.name?.trim()) throw new Error("Kontaktin nimi on pakollinen.");
@@ -820,9 +1001,7 @@ export default function Page() {
 
       const r = contactForm.id
         ? await supabase.from("contacts").update(payload).eq("id", contactForm.id)
-        : await supabase
-            .from("contacts")
-            .insert({ ...payload, created_at: new Date().toISOString() });
+        : await supabase.from("contacts").insert({ ...payload, created_at: new Date().toISOString() });
 
       if (r.error) throw r.error;
 
@@ -839,7 +1018,6 @@ export default function Page() {
   async function removeContact(id) {
     if (!window.confirm("Poistetaanko kontakti varmasti?")) return;
     setBusy((b) => ({ ...b, deletingContactId: id }));
-
     try {
       const r = await supabase.from("contacts").delete().eq("id", id);
       if (r.error) throw r.error;
@@ -854,13 +1032,11 @@ export default function Page() {
       setBusy((b) => ({ ...b, deletingContactId: null }));
     }
   }
-
-  async function saveTask(e) {
+	    async function saveTask(e) {
     e.preventDefault();
     setBusy((b) => ({ ...b, task: true }));
     setError("");
     setSuccess("");
-
     try {
       if (!taskForm.client_id) throw new Error("Valitse asiakkaalle tehtävä.");
       if (!taskForm.title?.trim()) throw new Error("Tehtävän otsikko on pakollinen.");
@@ -875,9 +1051,7 @@ export default function Page() {
 
       const r = taskForm.id
         ? await supabase.from("tasks").update(payload).eq("id", taskForm.id)
-        : await supabase
-            .from("tasks")
-            .insert({ ...payload, created_at: new Date().toISOString() });
+        : await supabase.from("tasks").insert({ ...payload, created_at: new Date().toISOString() });
 
       if (r.error) throw r.error;
 
@@ -894,7 +1068,6 @@ export default function Page() {
   async function removeTask(id) {
     if (!window.confirm("Poistetaanko tehtävä varmasti?")) return;
     setBusy((b) => ({ ...b, deletingTaskId: id }));
-
     try {
       const r = await supabase.from("tasks").delete().eq("id", id);
       if (r.error) throw r.error;
@@ -940,7 +1113,7 @@ export default function Page() {
       ...prev,
       {
         id: `tpl-${tpl.id}-${Date.now()}`,
-        description: tpl.name || "Palvelu",
+        description: tpl.name || tpl.service_name || "Palvelu",
         quantity: 1,
         unit_price: num(tpl.unit_price),
         sort_order: prev.length + 1,
@@ -952,7 +1125,6 @@ export default function Page() {
     setBusy((b) => ({ ...b, quote: true }));
     setError("");
     setSuccess("");
-
     try {
       if (!quoteForm.client_id) throw new Error("Valitse asiakkaalle tarjous.");
       if (!quoteForm.title?.trim()) throw new Error("Tarjouksen otsikko on pakollinen.");
@@ -981,7 +1153,17 @@ export default function Page() {
         status: quoteForm.status || "Luonnos",
         issue_date: quoteForm.issue_date || null,
         valid_until: quoteForm.valid_until || null,
+        quote_valid_days: num(quoteForm.quote_valid_days || 14),
         vat_rate,
+        is_b2b: !!quoteForm.is_b2b,
+        vat_included: !!quoteForm.vat_included,
+        payment_terms_days: num(quoteForm.payment_terms_days || 14),
+        invoice_status: quoteForm.invoice_status || "Ei laskutettu",
+        invoice_number: quoteForm.invoice_number?.trim() || null,
+        invoice_date: quoteForm.invoice_date || null,
+        expected_payment_date:
+          quoteForm.expected_payment_date ||
+          addDays(quoteForm.invoice_date || quoteForm.issue_date || today(), quoteForm.payment_terms_days || 14),
         subtotal,
         vat_amount,
         total,
@@ -1031,7 +1213,6 @@ export default function Page() {
   async function removeQuote(id) {
     if (!window.confirm("Poistetaanko tarjous varmasti?")) return;
     setBusy((b) => ({ ...b, deletingQuoteId: id }));
-
     try {
       const a = await supabase.from("quote_lines").delete().eq("quote_id", id);
       if (a.error) throw a.error;
@@ -1054,7 +1235,6 @@ export default function Page() {
   async function changeQuoteStatus(id, status) {
     setError("");
     setSuccess("");
-
     try {
       const r = await supabase
         .from("quotes")
@@ -1064,16 +1244,38 @@ export default function Page() {
 
       setQuotes((prev) => prev.map((q) => (q.id === id ? { ...q, status } : q)));
       setSuccess("Tarjouksen status päivitetty.");
+      await loadData();
     } catch (err) {
       setError(err.message || "Statuksen päivitys epäonnistui.");
     }
   }
-	    async function saveFinance(e) {
+
+  async function invoiceQuote(id) {
+    setBusy((b) => ({ ...b, invoicingQuoteId: id }));
+    setError("");
+    setSuccess("");
+    try {
+      const { data, error } = await supabase.rpc("invoice_quote", { p_quote_id: id });
+      if (error) throw error;
+
+      setSuccess(
+        data?.invoice_number
+          ? `Tarjous laskutettu: ${data.invoice_number}`
+          : "Tarjous laskutettu."
+      );
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Laskutus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, invoicingQuoteId: null }));
+    }
+  }
+
+  async function saveFinance(e) {
     e.preventDefault();
     setBusy((b) => ({ ...b, finance: true }));
     setError("");
     setSuccess("");
-
     try {
       const revenue = num(financeForm.revenue);
       const expenses = num(financeForm.expenses);
@@ -1110,7 +1312,6 @@ export default function Page() {
   async function removeFinance(id) {
     if (!window.confirm("Poistetaanko kuukausirivi varmasti?")) return;
     setBusy((b) => ({ ...b, deletingFinanceId: id }));
-
     try {
       const r = await supabase.from("finance_monthly").delete().eq("id", id);
       if (r.error) throw r.error;
@@ -1125,13 +1326,11 @@ export default function Page() {
       setBusy((b) => ({ ...b, deletingFinanceId: null }));
     }
   }
-
-  async function saveCashflow(e) {
+	    async function saveCashflow(e) {
     e.preventDefault();
     setBusy((b) => ({ ...b, cashflow: true }));
     setError("");
     setSuccess("");
-
     try {
       const payload = {
         event_date: cashflowForm.event_date || null,
@@ -1165,7 +1364,6 @@ export default function Page() {
   async function removeCashflow(id) {
     if (!window.confirm("Poistetaanko kassavirtarivi varmasti?")) return;
     setBusy((b) => ({ ...b, deletingCashflowId: id }));
-
     try {
       const r = await supabase.from("cashflow_events").delete().eq("id", id);
       if (r.error) throw r.error;
@@ -1186,10 +1384,10 @@ export default function Page() {
     setBusy((b) => ({ ...b, template: true }));
     setError("");
     setSuccess("");
-
     try {
       const payload = {
-        name: templateForm.name?.trim() || null,
+        name: templateForm.name?.trim() || templateForm.service_name?.trim() || null,
+        service_name: templateForm.service_name?.trim() || templateForm.name?.trim() || null,
         category: templateForm.category?.trim() || null,
         unit: templateForm.unit?.trim() || "kpl",
         unit_price: num(templateForm.unit_price),
@@ -1198,7 +1396,8 @@ export default function Page() {
         description: templateForm.description?.trim() || null,
       };
 
-      if (!payload.name) throw new Error("Hinnoittelupohjan nimi on pakollinen.");
+      if (!payload.name && !payload.service_name)
+        throw new Error("Hinnoittelupohjan nimi on pakollinen.");
 
       const r = templateForm.id
         ? await supabase.from("pricing_templates").update(payload).eq("id", templateForm.id)
@@ -1221,7 +1420,6 @@ export default function Page() {
   async function removeTemplate(id) {
     if (!window.confirm("Poistetaanko hinnoittelupohja varmasti?")) return;
     setBusy((b) => ({ ...b, deletingTemplateId: id }));
-
     try {
       const r = await supabase.from("pricing_templates").delete().eq("id", id);
       if (r.error) throw r.error;
@@ -1237,14 +1435,83 @@ export default function Page() {
     }
   }
 
+  async function saveCalendarEvent(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, calendar: true }));
+    setError("");
+    setSuccess("");
+    try {
+      if (!calendarForm.title?.trim()) throw new Error("Kalenteritapahtuman otsikko on pakollinen.");
+      if (!calendarForm.start_at || !calendarForm.end_at)
+        throw new Error("Alku- ja loppuaika ovat pakolliset.");
+
+      const payload = {
+        client_id: calendarForm.client_id || null,
+        quote_id: calendarForm.quote_id || null,
+        title: calendarForm.title?.trim(),
+        event_type: calendarForm.event_type || "Kuvaus",
+        status: calendarForm.status || "Suunniteltu",
+        start_at: new Date(calendarForm.start_at).toISOString(),
+        end_at: new Date(calendarForm.end_at).toISOString(),
+        location: calendarForm.location?.trim() || null,
+        notes: calendarForm.notes?.trim() || null,
+      };
+
+      const r = calendarForm.id
+        ? await supabase.from("calendar_events").update(payload).eq("id", calendarForm.id)
+        : await supabase
+            .from("calendar_events")
+            .insert({ ...payload, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+
+      if (r.error) throw r.error;
+
+      setSuccess(calendarForm.id ? "Kalenteritapahtuma päivitetty." : "Kalenteritapahtuma lisätty.");
+      resetCalendar();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kalenteritapahtuman tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, calendar: false }));
+    }
+  }
+
+  async function removeCalendarEvent(id) {
+    if (!window.confirm("Poistetaanko kalenteritapahtuma varmasti?")) return;
+    setBusy((b) => ({ ...b, deletingCalendarId: id }));
+    try {
+      const r = await supabase.from("calendar_events").delete().eq("id", id);
+      if (r.error) throw r.error;
+
+      if (calendarForm.id === id) resetCalendar();
+
+      setSuccess("Kalenteritapahtuma poistettu.");
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kalenteritapahtuman poisto epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, deletingCalendarId: null }));
+    }
+  }
+
   const nav = [
     ["dashboard", "Dashboard"],
     ["crm", "CRM"],
     ["kanban", "Kanban"],
     ["quotes", "Tarjoukset"],
     ["finance", "Talous"],
+    ["calendar", "Kalenteri"],
     ["settings", "Asetukset"],
   ];
+
+  if (loading) {
+    return (
+      <div style={sx.page}>
+        <div style={sx.wrap}>
+          <div style={sx.card}>Haetaan dataa Supabasesta...</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={sx.page}>
@@ -1264,18 +1531,15 @@ export default function Page() {
                 marginBottom: 14,
               }}
             >
-              SALOPINO CRM / TALOUSOHJAUS V3
+              SALOPINO CRM / TALOUSOHJAUS V5
             </div>
 
             <h1 style={{ margin: "0 0 10px", fontSize: 42, lineHeight: 1.05, fontWeight: 900 }}>
-              Täysi yhtenäinen operatiivinen näkymä
+              CRM + tarjoukset + laskutus + kalenteri + kassavirta
             </h1>
 
             <p style={{ margin: 0, color: "rgba(244,241,233,.74)", fontSize: 16, lineHeight: 1.7 }}>
-              Dashboard, CRM, Kanban, Tarjoukset, Talous ja Asetukset samassa
-              Next.js-sivussa. Mukana tarjouskanta euroina, voitetut ja hävityt tarjoukset
-              euroina, asiakaskontaktit, asiakaskohtaiset tehtävät, kassavirran
-              ennusteet ja tarjousrivien lisääminen suoraan pricing templateista.
+              Yksi yhtenäinen käyttöliittymä myynnin, tarjousten, asiakkuuksien, kalenterin, laskutuksen ja kassavirran hallintaan. Oletus B2B-malliin: ALV 0 %.
             </p>
           </div>
 
@@ -1293,7 +1557,7 @@ export default function Page() {
               Navigaatio
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 10 }}>
               {nav.map(([k, label]) => (
                 <button
                   key={k}
@@ -1331,8 +1595,7 @@ export default function Page() {
                 lineHeight: 1.6,
               }}
             >
-              Taulut: clients, contacts, tasks, finance_monthly, cashflow_events,
-              quotes, quote_lines, pricing_templates, import_logs.
+              Taulut: clients, contacts, tasks, finance_monthly, cashflow_events, quotes, quote_lines, pricing_templates, import_logs, calendar_events.
             </div>
           </div>
         </header>
@@ -1354,95 +1617,83 @@ export default function Page() {
             {error || success}
           </div>
         )}
+		          <>
+          {view === "dashboard" && (
+            <section>
+              <Title eyebrow="Operatiivinen tilannekuva" title="Dashboard" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
 
-        {loading ? (
-          <div style={sx.card}>Haetaan dataa Supabasesta...</div>
-        ) : (
-          <>
-            {view === "dashboard" && (
-              <section>
-                <Title
-                  eyebrow="Operatiivinen tilannekuva"
-                  title="Dashboard"
-                  right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>}
-                />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(8,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
+                <Metric title="Asiakkaita" value={dashboard.totalClients} sub={`Voitettuja ${dashboard.wonClients} kpl`} accent />
+                <Metric title="Avoimet tehtävät" value={dashboard.openTasks} sub={`Myöhässä ${dashboard.overdueTasks} kpl`} />
+                <Metric title="Avoimet tarjoukset" value={dashboard.openQuotes} sub="Luonnos / Lähetetty" />
+                <Metric title="Tarjouskanta" value={eur(dashboard.quotePipeline)} sub="Avoimet tarjoukset €" />
+                <Metric title="Voitetut" value={eur(dashboard.quoteWon)} sub="Hyväksytyt tarjoukset €" />
+                <Metric title="Hävityt" value={eur(dashboard.quoteLost)} sub="Hylätyt / vanhentuneet €" />
+                <Metric title="Viimeisin tulos" value={eur(dashboard.latestProfit)} sub={`Liikevaihto ${eur(dashboard.latestRevenue)}`} />
+                <Metric title="30 pv kassavirta" value={eur(dashboard.next30Cashflow)} sub={`Tavoite ${eur(dashboard.latestTarget)}`} />
+              </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(8,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
-                  <Metric title="Asiakkaita" value={dashboard.totalClients} sub={`Voitettuja ${dashboard.wonClients} kpl`} accent />
-                  <Metric title="Avoimet tehtävät" value={dashboard.openTasks} sub={`Myöhässä ${dashboard.overdueTasks} kpl`} />
-                  <Metric title="Avoimet tarjoukset" value={dashboard.openQuotes} sub="Luonnos / Lähetetty" />
-                  <Metric title="Tarjouskanta" value={eur(dashboard.quotePipeline)} sub="Avoimet tarjoukset €" />
-                  <Metric title="Voitetut" value={eur(dashboard.quoteWon)} sub="Hyväksytyt tarjoukset €" />
-                  <Metric title="Hävityt" value={eur(dashboard.quoteLost)} sub="Hylätyt / vanhentuneet €" />
-                  <Metric title="Viimeisin tulos" value={eur(dashboard.latestProfit)} sub={`Liikevaihto ${eur(dashboard.latestRevenue)}`} />
-                  <Metric title="30 pv kassavirta" value={eur(dashboard.next30Cashflow)} sub={`Tavoite ${eur(dashboard.latestTarget)}`} />
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18, marginBottom: 18 }}>
+                <div style={sx.card}>
+                  <Title eyebrow="Tavoitevertailu" title="Kuukauden liikennevalo" />
+                  <div style={{ display: "grid", gap: 12 }}>
+                    <div style={{ fontSize: 34, fontWeight: 900 }}>{eur(dashboard.monthRevenue)}</div>
+                    <div style={{ color: "rgba(244,241,233,.66)" }}>Toteuma {ymKey(new Date())}</div>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                      <StatPill
+                        label={dashboard.monthTraffic.label}
+                        good={dashboard.monthTraffic.label === "Vihreä"}
+                        warn={dashboard.monthTraffic.label === "Keltainen"}
+                        danger={dashboard.monthTraffic.label === "Punainen"}
+                      />
+                      <span style={{ color: dashboard.monthTraffic.color }}>
+                        Tavoite {eur(dashboard.monthTarget)} · toteuma{" "}
+                        {pct(
+                          dashboard.monthTarget
+                            ? (dashboard.monthRevenue / dashboard.monthTarget) * 100
+                            : 0
+                        )}
+                      </span>
+                    </div>
+                  </div>
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18, marginBottom: 18 }}>
-                  <div style={sx.card}>
-                    <Title eyebrow="Tavoitevertailu" title="Kuukauden liikennevalo" />
-                    <div style={{ display: "grid", gap: 12 }}>
-                      <div style={{ fontSize: 34, fontWeight: 900 }}>{eur(dashboard.monthRevenue)}</div>
-                      <div style={{ color: "rgba(244,241,233,.66)" }}>Toteuma {ymKey(new Date())}</div>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <StatPill
-                          label={dashboard.monthTraffic.label}
-                          good={dashboard.monthTraffic.label === "Vihreä"}
-                          warn={dashboard.monthTraffic.label === "Keltainen"}
-                          danger={dashboard.monthTraffic.label === "Punainen"}
-                        />
-                        <span style={{ color: dashboard.monthTraffic.color }}>
-                          Tavoite {eur(dashboard.monthTarget)} · toteuma{" "}
-                          {pct(
-                            dashboard.monthTarget
-                              ? (dashboard.monthRevenue / dashboard.monthTarget) * 100
-                              : 0
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div style={sx.card}>
-                    <Title eyebrow="Kassavirran ennuste" title="6 kk näkymä" />
-                    <div style={{ display: "grid", gap: 10 }}>
-                      {dashboard.forecastRows.length ? (
-                        dashboard.forecastRows.map((r) => (
-                          <div
-                            key={r.month}
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              gap: 12,
-                              padding: 12,
-                              borderRadius: 14,
-                              background: "rgba(10,10,16,.78)",
-                              border: "1px solid rgba(231,223,178,.08)",
-                            }}
-                          >
-                            <strong>{r.month}</strong>
-                            <span
-                              style={{
-                                fontWeight: 800,
-                                color: num(r.amount) >= 0 ? "#dfffe8" : "#ffd8de",
-                              }}
-                            >
-                              {eur(r.amount)}
-                            </span>
-                          </div>
-                        ))
-                      ) : (
-                        <div style={{ color: "rgba(244,241,233,.58)" }}>Ei ennustedataa.</div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div style={sx.card}>
-                    <Title eyebrow="Importit" title="Viimeisimmät ajot" />
-                    <div style={{ display: "grid", gap: 10 }}>
-                      {importLogs.slice(0, 5).map((r) => (
+                <div style={sx.card}>
+                  <Title eyebrow="Kassavirran ennuste" title="6 kk näkymä" />
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {dashboard.forecastRows.length ? (
+                      dashboard.forecastRows.map((r) => (
                         <div
-                          key={r.id}
+                          key={r.month}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: 12,
+                            padding: 12,
+                            borderRadius: 14,
+                            background: "rgba(10,10,16,.78)",
+                            border: "1px solid rgba(231,223,178,.08)",
+                          }}
+                        >
+                          <strong>{r.month}</strong>
+                          <span style={{ fontWeight: 800, color: num(r.amount) >= 0 ? "#dfffe8" : "#ffd8de" }}>
+                            {eur(r.amount)}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <div style={{ color: "rgba(244,241,233,.58)" }}>Ei ennustedataa.</div>
+                    )}
+                  </div>
+                </div>
+
+                <div style={sx.card}>
+                  <Title eyebrow="Kalenteri" title="Seuraavat tapahtumat" />
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {dashboard.calendarNext.length ? (
+                      dashboard.calendarNext.map((e) => (
+                        <div
+                          key={e.id}
                           style={{
                             padding: 12,
                             borderRadius: 14,
@@ -1450,995 +1701,756 @@ export default function Page() {
                             border: "1px solid rgba(231,223,178,.08)",
                           }}
                         >
-                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 4 }}>
-                            <strong>{r.import_type || "Import"}</strong>
-                            <span style={{ color: "rgba(244,241,233,.62)", fontSize: 13 }}>
-                              {fmtDateTime(r.imported_at)}
-                            </span>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                            <strong>{e.title}</strong>
+                            <span style={{ fontSize: 12 }}>{e.status || "-"}</span>
                           </div>
-                          <div style={{ color: "rgba(244,241,233,.70)", fontSize: 14 }}>
-                            {r.source_name || "-"}
+                          <div style={{ marginTop: 5, fontSize: 13, color: "rgba(244,241,233,.58)" }}>
+                            {fmtDateTime(e.start_at)}
                           </div>
-                          <div style={{ marginTop: 4, fontSize: 13, color: "rgba(244,241,233,.58)" }}>
-                            {r.status || "-"} · rivit {r.row_count ?? "-"}
+                        </div>
+                      ))
+                    ) : (
+                      <div style={{ color: "rgba(244,241,233,.58)" }}>Ei tulevia tapahtumia.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {view === "crm" && (
+            <section>
+              <Title eyebrow="Asiakkuudet, kontaktit ja tehtävät" title="CRM" right={<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}><Btn variant="ghost" onClick={resetClient}>Uusi asiakas</Btn><Btn variant="ghost" onClick={loadData}>Päivitä</Btn></div>} />
+
+              <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
+                <div style={sx.cardDark}>
+                  <Title eyebrow={clientForm.id ? "Muokkaus" : "Uusi asiakas"} title={clientForm.id ? "Päivitä tiedot" : "Lisää asiakas"} />
+                  <form onSubmit={saveClient}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      <Field label="Nimi *"><Input value={clientForm.name} onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })} /></Field>
+                      <Field label="Yritys"><Input value={clientForm.company_name} onChange={(e) => setClientForm({ ...clientForm, company_name: e.target.value })} /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Sähköposti"><Input value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} /></Field>
+                        <Field label="Puhelin"><Input value={clientForm.phone} onChange={(e) => setClientForm({ ...clientForm, phone: e.target.value })} /></Field>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Kaupunki"><Input value={clientForm.city} onChange={(e) => setClientForm({ ...clientForm, city: e.target.value })} /></Field>
+                        <Field label="Y-tunnus"><Input value={clientForm.business_id} onChange={(e) => setClientForm({ ...clientForm, business_id: e.target.value })} /></Field>
+                      </div>
+                      <Field label="Status">
+                        <Select value={clientForm.status} onChange={(e) => setClientForm({ ...clientForm, status: e.target.value })}>
+                          {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </Select>
+                      </Field>
+                      <Field label="Finder-linkki"><Input value={clientForm.finder_url} onChange={(e) => setClientForm({ ...clientForm, finder_url: e.target.value })} /></Field>
+                      <Field label="Asiakastieto-linkki"><Input value={clientForm.asiakastieto_url} onChange={(e) => setClientForm({ ...clientForm, asiakastieto_url: e.target.value })} /></Field>
+                      <Field label="LinkedIn-linkki"><Input value={clientForm.linkedin_url} onChange={(e) => setClientForm({ ...clientForm, linkedin_url: e.target.value })} /></Field>
+                      <Field label="Muistiinpanot"><TextArea value={clientForm.notes} onChange={(e) => setClientForm({ ...clientForm, notes: e.target.value })} /></Field>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Btn type="submit">{busy.client ? "Tallennetaan..." : clientForm.id ? "Päivitä asiakas" : "Lisää asiakas"}</Btn>
+                        <Btn type="button" variant="ghost" onClick={resetClient}>Tyhjennä</Btn>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+
+                <div style={{ display: "grid", gap: 18 }}>
+                  <div style={sx.card}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12, marginBottom: 14 }}>
+                      <Field label="Hae asiakasta"><Input value={crmSearch} onChange={(e) => setCrmSearch(e.target.value)} placeholder="Nimi, yritys, sähköposti..." /></Field>
+                      <Field label="Status-suodatus">
+                        <Select value={crmStatusFilter} onChange={(e) => setCrmStatusFilter(e.target.value)}>
+                          <option value="Kaikki">Kaikki</option>
+                          {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </Select>
+                      </Field>
+                    </div>
+
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {filteredClients.map((c) => (
+                        <div
+                          key={c.id}
+                          style={{
+                            padding: 16,
+                            borderRadius: 16,
+                            background: selectedClientId === c.id ? "rgba(32,28,18,.92)" : "rgba(10,10,16,.78)",
+                            border: selectedClientId === c.id ? "1px solid rgba(231,223,178,.20)" : "1px solid rgba(231,223,178,.08)",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start", flexWrap: "wrap" }}>
+                            <div style={{ flex: 1, minWidth: 250 }}>
+                              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                                <div style={{ fontSize: 20, fontWeight: 800 }}>{c.name || "-"}</div>
+                                <span style={{ ...sx.pill, background: "rgba(231,223,178,.08)" }}>{normClientStatus(c.status)}</span>
+                              </div>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, fontSize: 14, color: "rgba(244,241,233,.72)" }}>
+                                <div><strong>Yritys:</strong> {c.company_name || "-"}</div>
+                                <div><strong>Kaupunki:</strong> {c.city || "-"}</div>
+                                <div><strong>Sähköposti:</strong> {c.email || "-"}</div>
+                                <div><strong>Puhelin:</strong> {c.phone || "-"}</div>
+                              </div>
+                            </div>
+
+                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                              <Btn variant="ghost" onClick={() => { setSelectedClientId(c.id); fillClient(c); }}>Muokkaa</Btn>
+                              <Btn variant="ghost" onClick={() => setSelectedClientId(c.id)}>Valitse</Btn>
+                              <Btn variant="danger" onClick={() => removeClient(c.id)}>
+                                {busy.deletingClientId === c.id ? "Poistetaan..." : "Poista"}
+                              </Btn>
+                            </div>
                           </div>
                         </div>
                       ))}
                     </div>
                   </div>
-                </div>
-		                  <div style={{ display: "grid", gridTemplateColumns: "1.1fr .9fr", gap: 18 }}>
+
                   <div style={sx.card}>
-                    <Title eyebrow="Viimeisimmät asiakkaat" title="CRM-sisääntulo" />
-                    <table style={sx.table}>
-                      <thead>
-                        <tr>
-                          {["Nimi", "Yritys", "Status", "Puhelin", "Luotu", ""].map((h) => (
-                            <th key={h} style={sx.th}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {clients.slice(0, 8).map((c) => (
-                          <tr key={c.id}>
-                            <td style={{ ...sx.td, fontWeight: 700 }}>{c.name || "-"}</td>
-                            <td style={sx.td}>{c.company_name || "-"}</td>
-                            <td style={sx.td}>{normClientStatus(c.status)}</td>
-                            <td style={sx.td}>{c.phone || "-"}</td>
-                            <td style={sx.td}>{fmtDate(c.created_at)}</td>
-                            <td style={sx.td}>
-                              <Btn variant="ghost" onClick={() => fillClient(c)}>Avaa</Btn>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 18 }}>
-                    <div style={sx.card}>
-                      <Title eyebrow="Tehtävät" title="Avoimet tehtävät" />
-                      <div style={{ display: "grid", gap: 10 }}>
-                        {tasks.slice(0, 6).map((t) => {
-                          const done =
-                            typeof t.completed === "boolean"
-                              ? t.completed
-                              : ["done", "completed", "valmis"].includes(
-                                  String(t.status || "").toLowerCase()
-                                );
-                          return (
-                            <div
-                              key={t.id}
-                              style={{
-                                padding: 13,
-                                borderRadius: 14,
-                                background: "rgba(10,10,16,.78)",
-                                border: "1px solid rgba(231,223,178,.08)",
-                              }}
-                            >
-                              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                                <strong>{t.title || "Nimetön tehtävä"}</strong>
-                                <span style={{ fontSize: 12 }}>{done ? "Valmis" : t.status || "Avoin"}</span>
-                              </div>
-                              <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.58)" }}>
-                                {clientMap.get(t.client_id)?.name || "-"} · eräpäivä {fmtDate(t.due_date)}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div style={sx.card}>
-                      <Title eyebrow="Tarjoukset" title="Tuoreimmat liikkeet" />
-                      <div style={{ display: "grid", gap: 10 }}>
-                        {quotesEnriched.slice(0, 6).map((q) => (
-                          <div
-                            key={q.id}
-                            style={{
-                              padding: 13,
-                              borderRadius: 14,
-                              background: "rgba(10,10,16,.78)",
-                              border: "1px solid rgba(231,223,178,.08)",
-                            }}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                              <strong>{q.title || "Tarjous"}</strong>
-                              <span style={{ fontSize: 12 }}>{normQuoteStatus(q.status)}</span>
-                            </div>
-                            <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.58)" }}>
-                              {q.client?.name || "-"} · {eur(q.total)}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {view === "crm" && (
-              <section>
-                <Title
-                  eyebrow="Asiakkuudet, kontaktit ja tehtävät"
-                  title="CRM"
-                  right={
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                      <Btn variant="ghost" onClick={resetClient}>Uusi asiakas</Btn>
-                      <Btn variant="ghost" onClick={loadData}>Päivitä</Btn>
-                    </div>
-                  }
-                />
-
-                <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
-                  <div style={sx.cardDark}>
-                    <Title
-                      eyebrow={clientForm.id ? "Muokkaus" : "Uusi asiakas"}
-                      title={clientForm.id ? "Päivitä tiedot" : "Lisää asiakas"}
-                    />
-
-                    <form onSubmit={saveClient}>
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Nimi *"><Input value={clientForm.name} onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })} /></Field>
-                        <Field label="Yritys"><Input value={clientForm.company_name} onChange={(e) => setClientForm({ ...clientForm, company_name: e.target.value })} /></Field>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Sähköposti"><Input value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} /></Field>
-                          <Field label="Puhelin"><Input value={clientForm.phone} onChange={(e) => setClientForm({ ...clientForm, phone: e.target.value })} /></Field>
-                        </div>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Kaupunki"><Input value={clientForm.city} onChange={(e) => setClientForm({ ...clientForm, city: e.target.value })} /></Field>
-                          <Field label="Y-tunnus"><Input value={clientForm.business_id} onChange={(e) => setClientForm({ ...clientForm, business_id: e.target.value })} /></Field>
-                        </div>
-
-                        <Field label="Status">
-                          <Select value={clientForm.status} onChange={(e) => setClientForm({ ...clientForm, status: e.target.value })}>
-                            {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </Select>
-                        </Field>
-
-                        <Field label="Finder-linkki"><Input value={clientForm.finder_url} onChange={(e) => setClientForm({ ...clientForm, finder_url: e.target.value })} /></Field>
-                        <Field label="Asiakastieto-linkki"><Input value={clientForm.asiakastieto_url} onChange={(e) => setClientForm({ ...clientForm, asiakastieto_url: e.target.value })} /></Field>
-                        <Field label="LinkedIn-linkki"><Input value={clientForm.linkedin_url} onChange={(e) => setClientForm({ ...clientForm, linkedin_url: e.target.value })} /></Field>
-                        <Field label="Muistiinpanot"><TextArea value={clientForm.notes} onChange={(e) => setClientForm({ ...clientForm, notes: e.target.value })} /></Field>
-
+                    <Title eyebrow="Valittu asiakas" title={selectedClient?.name || "Asiakaskortti"} />
+                    {selectedClient ? (
+                      <div style={{ display: "grid", gap: 18 }}>
                         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <Btn type="submit">{busy.client ? "Tallennetaan..." : clientForm.id ? "Päivitä asiakas" : "Lisää asiakas"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetClient}>Tyhjennä</Btn>
+                          <LinkChip href={selectedClient.finder_url} label="Finder" />
+                          <LinkChip href={selectedClient.asiakastieto_url} label="Asiakastieto" />
+                          <LinkChip href={selectedClient.linkedin_url} label="LinkedIn" />
                         </div>
-                      </div>
-                    </form>
-                  </div>
 
-                  <div style={{ display: "grid", gap: 18 }}>
-                    <div style={sx.card}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12, marginBottom: 14 }}>
-                        <Field label="Hae asiakasta">
-                          <Input value={crmSearch} onChange={(e) => setCrmSearch(e.target.value)} placeholder="Nimi, yritys, sähköposti..." />
-                        </Field>
-                        <Field label="Status-suodatus">
-                          <Select value={crmStatusFilter} onChange={(e) => setCrmStatusFilter(e.target.value)}>
-                            <option value="Kaikki">Kaikki</option>
-                            {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </Select>
-                        </Field>
-                      </div>
-
-                      <div style={{ display: "grid", gap: 12 }}>
-                        {filteredClients.map((c) => (
-                          <div
-                            key={c.id}
-                            style={{
-                              padding: 16,
-                              borderRadius: 16,
-                              background: selectedClientId === c.id ? "rgba(32,28,18,.92)" : "rgba(10,10,16,.78)",
-                              border: selectedClientId === c.id ? "1px solid rgba(231,223,178,.20)" : "1px solid rgba(231,223,178,.08)",
-                            }}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start", flexWrap: "wrap" }}>
-                              <div style={{ flex: 1, minWidth: 250 }}>
-                                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-                                  <div style={{ fontSize: 20, fontWeight: 800 }}>{c.name || "-"}</div>
-                                  <span style={{ ...sx.pill, background: "rgba(231,223,178,.08)" }}>{normClientStatus(c.status)}</span>
-                                </div>
-
-                                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, fontSize: 14, color: "rgba(244,241,233,.72)" }}>
-                                  <div><strong>Yritys:</strong> {c.company_name || "-"}</div>
-                                  <div><strong>Kaupunki:</strong> {c.city || "-"}</div>
-                                  <div><strong>Sähköposti:</strong> {c.email || "-"}</div>
-                                  <div><strong>Puhelin:</strong> {c.phone || "-"}</div>
-                                </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+                          <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
+                            <Title eyebrow="Kontakti" title="Asiakkaan kontaktit" right={<Btn variant="ghost" onClick={resetContact}>Uusi</Btn>} />
+                            <form onSubmit={saveContact} style={{ display: "grid", gap: 10, marginBottom: 14 }}>
+                              <Field label="Nimi *"><Input value={contactForm.name} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", name: e.target.value })} /></Field>
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                <Field label="Sähköposti"><Input value={contactForm.email} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", email: e.target.value })} /></Field>
+                                <Field label="Puhelin"><Input value={contactForm.phone} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", phone: e.target.value })} /></Field>
                               </div>
-
+                              <Field label="Rooli"><Input value={contactForm.role} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", role: e.target.value })} /></Field>
+                              <Field label="Muistiinpanot"><TextArea value={contactForm.notes} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", notes: e.target.value })} /></Field>
                               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                                <Btn variant="ghost" onClick={() => { setSelectedClientId(c.id); fillClient(c); }}>Muokkaa</Btn>
-                                <Btn variant="ghost" onClick={() => setSelectedClientId(c.id)}>Valitse</Btn>
-                                <Btn variant="danger" onClick={() => removeClient(c.id)}>
-                                  {busy.deletingClientId === c.id ? "Poistetaan..." : "Poista"}
-                                </Btn>
+                                <Btn type="submit">{busy.contact ? "Tallennetaan..." : contactForm.id ? "Päivitä" : "Lisää"}</Btn>
+                                <Btn type="button" variant="ghost" onClick={resetContact}>Tyhjennä</Btn>
                               </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+                            </form>
 
-                    <div style={sx.card}>
-                      <Title eyebrow="Valittu asiakas" title={selectedClient?.name || "Asiakaskortti"} />
-
-                      {selectedClient ? (
-                        <div style={{ display: "grid", gap: 18 }}>
-                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                            <LinkChip href={selectedClient.finder_url} label="Finder" />
-                            <LinkChip href={selectedClient.asiakastieto_url} label="Asiakastieto" />
-                            <LinkChip href={selectedClient.linkedin_url} label="LinkedIn" />
-                          </div>
-
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-                            <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
-                              <Title eyebrow="Kontakti" title="Asiakkaan kontaktit" right={<Btn variant="ghost" onClick={resetContact}>Uusi</Btn>} />
-
-                              <form onSubmit={saveContact} style={{ display: "grid", gap: 10, marginBottom: 14 }}>
-                                <Field label="Nimi *"><Input value={contactForm.name} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", name: e.target.value })} /></Field>
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                                  <Field label="Sähköposti"><Input value={contactForm.email} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", email: e.target.value })} /></Field>
-                                  <Field label="Puhelin"><Input value={contactForm.phone} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", phone: e.target.value })} /></Field>
-                                </div>
-                                <Field label="Rooli"><Input value={contactForm.role} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", role: e.target.value })} /></Field>
-                                <Field label="Muistiinpanot"><TextArea value={contactForm.notes} onChange={(e) => setContactForm({ ...contactForm, client_id: selectedClientId || "", notes: e.target.value })} /></Field>
-
-                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                                  <Btn type="submit">{busy.contact ? "Tallennetaan..." : contactForm.id ? "Päivitä" : "Lisää"}</Btn>
-                                  <Btn type="button" variant="ghost" onClick={resetContact}>Tyhjennä</Btn>
-                                </div>
-                              </form>
-
-                              <div style={{ display: "grid", gap: 10 }}>
-                                {selectedClientContacts.map((c) => (
-                                  <div key={c.id} style={{ padding: 12, borderRadius: 14, background: "rgba(15,15,23,.84)", border: "1px solid rgba(231,223,178,.08)" }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                                      <strong>{c.name}</strong>
-                                      <div style={{ display: "flex", gap: 8 }}>
-                                        <Btn variant="ghost" onClick={() => fillContact(c)} style={{ padding: "8px 10px", fontSize: 12 }}>Muokkaa</Btn>
-                                        <Btn variant="danger" onClick={() => removeContact(c.id)} style={{ padding: "8px 10px", fontSize: 12 }}>
-                                          {busy.deletingContactId === c.id ? "..." : "Poista"}
-                                        </Btn>
-                                      </div>
-                                    </div>
-                                    <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.62)" }}>
-                                      {c.role || "-"} · {c.email || "-"} · {c.phone || "-"}
+                            <div style={{ display: "grid", gap: 10 }}>
+                              {selectedClientContacts.map((c) => (
+                                <div key={c.id} style={{ padding: 12, borderRadius: 14, background: "rgba(15,15,23,.84)", border: "1px solid rgba(231,223,178,.08)" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                    <strong>{c.name}</strong>
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                      <Btn variant="ghost" onClick={() => fillContact(c)} style={{ padding: "8px 10px", fontSize: 12 }}>Muokkaa</Btn>
+                                      <Btn variant="danger" onClick={() => removeContact(c.id)} style={{ padding: "8px 10px", fontSize: 12 }}>
+                                        {busy.deletingContactId === c.id ? "..." : "Poista"}
+                                      </Btn>
                                     </div>
                                   </div>
-                                ))}
-                              </div>
-                            </div>
-
-                            <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
-                              <Title eyebrow="Tehtävä" title="Asiakaskohtaiset tehtävät" right={<Btn variant="ghost" onClick={resetTask}>Uusi</Btn>} />
-
-                              <form onSubmit={saveTask} style={{ display: "grid", gap: 10, marginBottom: 14 }}>
-                                <Field label="Otsikko *"><Input value={taskForm.title} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", title: e.target.value })} /></Field>
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                                  <Field label="Status"><Input value={taskForm.status} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", status: e.target.value })} /></Field>
-                                  <Field label="Eräpäivä"><Input type="date" value={taskForm.due_date} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", due_date: e.target.value })} /></Field>
-                                </div>
-                                <Field label="Muistiinpanot"><TextArea value={taskForm.notes} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", notes: e.target.value })} /></Field>
-
-                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                                  <Btn type="submit">{busy.task ? "Tallennetaan..." : taskForm.id ? "Päivitä" : "Lisää"}</Btn>
-                                  <Btn type="button" variant="ghost" onClick={resetTask}>Tyhjennä</Btn>
-                                </div>
-                              </form>
-
-                              <div style={{ display: "grid", gap: 10 }}>
-                                {selectedClientTasks.map((t) => (
-                                  <div key={t.id} style={{ padding: 12, borderRadius: 14, background: "rgba(15,15,23,.84)", border: "1px solid rgba(231,223,178,.08)" }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                                      <strong>{t.title}</strong>
-                                      <div style={{ display: "flex", gap: 8 }}>
-                                        <Btn variant="ghost" onClick={() => fillTask(t)} style={{ padding: "8px 10px", fontSize: 12 }}>Muokkaa</Btn>
-                                        <Btn variant="danger" onClick={() => removeTask(t.id)} style={{ padding: "8px 10px", fontSize: 12 }}>
-                                          {busy.deletingTaskId === t.id ? "..." : "Poista"}
-                                        </Btn>
-                                      </div>
-                                    </div>
-                                    <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.62)" }}>
-                                      {t.status || "Avoin"} · eräpäivä {fmtDate(t.due_date)}
-                                    </div>
+                                  <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.62)" }}>
+                                    {c.role || "-"} · {c.email || "-"} · {c.phone || "-"}
                                   </div>
-                                ))}
-                              </div>
+                                </div>
+                              ))}
                             </div>
                           </div>
 
                           <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
-                            <Title eyebrow="Tarjoukset" title="Asiakkaan tarjoukset" />
-                            <table style={sx.table}>
-                              <thead>
-                                <tr>
-                                  {["Tarjous", "Status", "Päiväys", "Voimassa", "Yhteensä", ""].map((h) => (
-                                    <th key={h} style={sx.th}>{h}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {selectedClientQuotes.map((q) => (
-                                  <tr key={q.id}>
-                                    <td style={{ ...sx.td, fontWeight: 700 }}>
-                                      {q.title || "Tarjous"}
-                                      <div style={{ fontSize: 12, color: "rgba(244,241,233,.56)" }}>{q.quote_number || "-"}</div>
-                                    </td>
-                                    <td style={sx.td}>{normQuoteStatus(q.status)}</td>
-                                    <td style={sx.td}>{fmtDate(q.issue_date)}</td>
-                                    <td style={sx.td}>{fmtDate(q.valid_until)}</td>
-                                    <td style={{ ...sx.td, fontWeight: 800 }}>{eur(q.total)}</td>
-                                    <td style={sx.td}><Btn variant="ghost" onClick={() => fillQuote(q)}>Avaa</Btn></td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      ) : (
-                        <div style={{ color: "rgba(244,241,233,.58)" }}>Valitse asiakas listalta.</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
-
-            {view === "kanban" && (
-              <section>
-                <Title eyebrow="Myyntiputki" title="Kanban" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
-                <div style={{ display: "grid", gridTemplateColumns: `repeat(${CLIENT_STATUSES.length}, minmax(260px,1fr))`, gap: 14, overflowX: "auto", alignItems: "start" }}>
-                  {CLIENT_STATUSES.map((col) => (
-                    <div key={col} style={{ ...sx.card, minWidth: 260, padding: 14 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid rgba(231,223,178,.08)" }}>
-                        <strong>{col}</strong>
-                        <span style={{ minWidth: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", background: "rgba(231,223,178,.08)", border: "1px solid rgba(231,223,178,.10)", color: "#d9c98a", fontWeight: 800 }}>
-                          {kanban[col]?.length || 0}
-                        </span>
-                      </div>
-
-                      <div style={{ display: "grid", gap: 12 }}>
-                        {(kanban[col] || []).length ? (
-                          kanban[col].map((c) => (
-                            <div key={c.id} style={{ padding: 14, borderRadius: 16, background: "linear-gradient(180deg, rgba(14,14,20,.95), rgba(10,10,15,.98))", border: "1px solid rgba(231,223,178,.08)" }}>
-                              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>{c.name || "-"}</div>
-                              <div style={{ fontSize: 13, color: "rgba(244,241,233,.66)", marginBottom: 6 }}>{c.company_name || "Ei yritysnimeä"}</div>
-                              <div style={{ fontSize: 13, color: "rgba(244,241,233,.56)", marginBottom: 10 }}>
-                                {c.email || "-"} {c.phone ? `• ${c.phone}` : ""}
+                            <Title eyebrow="Tehtävä" title="Asiakaskohtaiset tehtävät" right={<Btn variant="ghost" onClick={resetTask}>Uusi</Btn>} />
+                            <form onSubmit={saveTask} style={{ display: "grid", gap: 10, marginBottom: 14 }}>
+                              <Field label="Otsikko *"><Input value={taskForm.title} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", title: e.target.value })} /></Field>
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                <Field label="Status"><Input value={taskForm.status} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", status: e.target.value })} /></Field>
+                                <Field label="Eräpäivä"><Input type="date" value={taskForm.due_date} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", due_date: e.target.value })} /></Field>
                               </div>
-
-                              <Field label="Vaihda status">
-                                <Select value={normClientStatus(c.status)} onChange={(e) => changeClientStatus(c.id, e.target.value)}>
-                                  {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                                </Select>
-                              </Field>
-
-                              <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
-                                <Btn variant="ghost" onClick={() => { setSelectedClientId(c.id); fillClient(c); }}>Avaa</Btn>
-                                <Btn variant="danger" onClick={() => removeClient(c.id)}>
-                                  {busy.deletingClientId === c.id ? "Poistetaan..." : "Poista"}
-                                </Btn>
+                              <Field label="Muistiinpanot"><TextArea value={taskForm.notes} onChange={(e) => setTaskForm({ ...taskForm, client_id: selectedClientId || "", notes: e.target.value })} /></Field>
+                              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                                <Btn type="submit">{busy.task ? "Tallennetaan..." : taskForm.id ? "Päivitä" : "Lisää"}</Btn>
+                                <Btn type="button" variant="ghost" onClick={resetTask}>Tyhjennä</Btn>
                               </div>
-                            </div>
-                          ))
-                        ) : (
-                          <div style={{ padding: 14, borderRadius: 14, border: "1px dashed rgba(231,223,178,.14)", color: "rgba(244,241,233,.48)", textAlign: "center" }}>
-                            Ei asiakkaita
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
+                            </form>
 
-            {view === "quotes" && (
-              <section>
-                <Title
-                  eyebrow="Tarjousten hallinta"
-                  title="Tarjoukset"
-                  right={
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                      <Btn variant="ghost" onClick={resetQuote}>Uusi tarjous</Btn>
-                      <Btn variant="ghost" onClick={loadData}>Päivitä</Btn>
-                    </div>
-                  }
-                />
-
-                <div style={{ display: "grid", gridTemplateColumns: "520px 1fr", gap: 18 }}>
-                  <div style={sx.cardDark}>
-                    <Title
-                      eyebrow={quoteForm.id ? "Muokkaus" : "Uusi tarjous"}
-                      title={quoteForm.id ? "Päivitä tarjous" : "Luo tarjous"}
-                    />
-
-                    <form onSubmit={saveQuote}>
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Asiakas *">
-                          <Select value={quoteForm.client_id} onChange={(e) => setQuoteForm({ ...quoteForm, client_id: e.target.value })}>
-                            <option value="">Valitse asiakas</option>
-                            {clients.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                                {c.company_name ? ` – ${c.company_name}` : ""}
-                              </option>
-                            ))}
-                          </Select>
-                        </Field>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Tarjousnumero"><Input value={quoteForm.quote_number} onChange={(e) => setQuoteForm({ ...quoteForm, quote_number: e.target.value })} /></Field>
-                          <Field label="Status">
-                            <Select value={quoteForm.status} onChange={(e) => setQuoteForm({ ...quoteForm, status: e.target.value })}>
-                              {QUOTE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                            </Select>
-                          </Field>
-                        </div>
-
-                        <Field label="Otsikko *"><Input value={quoteForm.title} onChange={(e) => setQuoteForm({ ...quoteForm, title: e.target.value })} /></Field>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 130px", gap: 12 }}>
-                          <Field label="Päiväys"><Input type="date" value={quoteForm.issue_date} onChange={(e) => setQuoteForm({ ...quoteForm, issue_date: e.target.value })} /></Field>
-                          <Field label="Voimassa asti"><Input type="date" value={quoteForm.valid_until} onChange={(e) => setQuoteForm({ ...quoteForm, valid_until: e.target.value })} /></Field>
-                          <Field label="ALV %"><Input type="number" step="0.1" value={quoteForm.vat_rate} onChange={(e) => setQuoteForm({ ...quoteForm, vat_rate: e.target.value })} /></Field>
-                        </div>
-
-                        <div style={{ padding: 14, borderRadius: 16, background: "rgba(10,10,16,.58)", border: "1px solid rgba(231,223,178,.12)" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                            <strong>Tarjousrivit</strong>
-                            <Btn type="button" variant="ghost" onClick={addDraftLine}>Lisää rivi</Btn>
-                          </div>
-
-                          <div style={{ display: "grid", gap: 10 }}>
-                            {quoteDraftLines.map((l, i) => (
-                              <div key={l.id} style={{ padding: 12, borderRadius: 14, background: "rgba(8,8,13,.68)", border: "1px solid rgba(231,223,178,.08)" }}>
-                                <div style={{ marginBottom: 8, fontSize: 12, color: "#d9c98a", fontWeight: 700 }}>
-                                  Rivi {i + 1}
-                                </div>
-
-                                <Field label="Kuvaus">
-                                  <Input value={l.description} onChange={(e) => updateDraftLine(l.id, "description", e.target.value)} />
-                                </Field>
-
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 10, marginTop: 10 }}>
-                                  <Field label="Määrä">
-                                    <Input type="number" step="0.01" value={l.quantity} onChange={(e) => updateDraftLine(l.id, "quantity", e.target.value)} />
-                                  </Field>
-                                  <Field label="Yksikköhinta">
-                                    <Input type="number" step="0.01" value={l.unit_price} onChange={(e) => updateDraftLine(l.id, "unit_price", e.target.value)} />
-                                  </Field>
-                                  <div style={{ display: "flex", alignItems: "end" }}>
-                                    <Btn type="button" variant="danger" onClick={() => removeDraftLine(l.id)}>Poista</Btn>
+                            <div style={{ display: "grid", gap: 10 }}>
+                              {selectedClientTasks.map((t) => (
+                                <div key={t.id} style={{ padding: 12, borderRadius: 14, background: "rgba(15,15,23,.84)", border: "1px solid rgba(231,223,178,.08)" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                    <strong>{t.title}</strong>
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                      <Btn variant="ghost" onClick={() => fillTask(t)} style={{ padding: "8px 10px", fontSize: 12 }}>Muokkaa</Btn>
+                                      <Btn variant="danger" onClick={() => removeTask(t.id)} style={{ padding: "8px 10px", fontSize: 12 }}>
+                                        {busy.deletingTaskId === t.id ? "..." : "Poista"}
+                                      </Btn>
+                                    </div>
+                                  </div>
+                                  <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.62)" }}>
+                                    {t.status || "Avoin"} · eräpäivä {fmtDate(t.due_date)}
                                   </div>
                                 </div>
-
-                                <div style={{ marginTop: 8, fontSize: 14 }}>
-                                  Rivin summa: <strong>{eur(num(l.quantity) * num(l.unit_price))}</strong>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-
-                          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                            <Metric title="Veroton" value={eur(quoteTotals.subtotal)} sub="" />
-                            <Metric title="ALV" value={eur(quoteTotals.vatAmount)} sub="" />
-                            <Metric title="Yhteensä" value={eur(quoteTotals.total)} sub="" accent />
+                              ))}
+                            </div>
                           </div>
                         </div>
 
-                        <Field label="Muistiinpanot">
-                          <TextArea value={quoteForm.notes} onChange={(e) => setQuoteForm({ ...quoteForm, notes: e.target.value })} />
-                        </Field>
-
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <Btn type="submit">{busy.quote ? "Tallennetaan..." : quoteForm.id ? "Päivitä tarjous" : "Tallenna tarjous"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetQuote}>Tyhjennä</Btn>
-                        </div>
-                      </div>
-                    </form>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 18 }}>
-                    <div style={sx.card}>
-                      <Title eyebrow="Hinnoittelupohjat" title="Lisää tarjousriviksi" />
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 10 }}>
-                        {pricingTemplates.filter((t) => t.is_active).slice(0, 12).map((tpl) => (
-                          <div key={tpl.id} style={{ padding: 12, borderRadius: 14, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
-                            <strong>{tpl.name}</strong>
-                            <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.62)" }}>
-                              {tpl.category || "-"} · {eur(tpl.unit_price)} / {tpl.unit || "kpl"}
-                            </div>
-                            <div style={{ marginTop: 10 }}>
-                              <Btn variant="ghost" onClick={() => addTemplateToQuote(tpl)}>Lisää riviksi</Btn>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div style={sx.card}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12, marginBottom: 14 }}>
-                        <Field label="Hae tarjouksia">
-                          <Input value={quoteSearch} onChange={(e) => setQuoteSearch(e.target.value)} placeholder="Tarjousnumero, otsikko, asiakas..." />
-                        </Field>
-                        <Field label="Status-suodatus">
-                          <Select value={quoteStatusFilter} onChange={(e) => setQuoteStatusFilter(e.target.value)}>
-                            <option value="Kaikki">Kaikki</option>
-                            {QUOTE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </Select>
-                        </Field>
-                      </div>
-
-                      <div style={{ display: "grid", gap: 12 }}>
-                        {filteredQuotes.map((q) => (
-                          <div
-                            key={q.id}
-                            style={{
-                              padding: 16,
-                              borderRadius: 16,
-                              background: selectedQuoteId === q.id ? "rgba(32,28,18,.92)" : "rgba(10,10,16,.78)",
-                              border: selectedQuoteId === q.id ? "1px solid rgba(231,223,178,.20)" : "1px solid rgba(231,223,178,.08)",
-                            }}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start", flexWrap: "wrap" }}>
-                              <div style={{ flex: 1, minWidth: 250 }}>
-                                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-                                  <div style={{ fontSize: 19, fontWeight: 800 }}>{q.title || "Tarjous"}</div>
-                                  <span style={{ ...sx.pill, background: "rgba(231,223,178,.08)" }}>{normQuoteStatus(q.status)}</span>
-                                </div>
-
-                                <div style={{ color: "rgba(244,241,233,.74)", lineHeight: 1.7, fontSize: 14 }}>
-                                  <div><strong>Nro:</strong> {q.quote_number || "-"}</div>
-                                  <div><strong>Asiakas:</strong> {q.client?.name || "-"}{q.client?.company_name ? ` / ${q.client.company_name}` : ""}</div>
-                                  <div><strong>Voimassa:</strong> {fmtDate(q.valid_until)}</div>
-                                  <div><strong>Yhteensä:</strong> {eur(q.total)}</div>
-                                </div>
-                              </div>
-
-                              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                                <Btn variant="ghost" onClick={() => setSelectedQuoteId(q.id)}>Avaa</Btn>
-                                <Btn variant="ghost" onClick={() => fillQuote(q)}>Muokkaa</Btn>
-                                <Btn variant="danger" onClick={() => removeQuote(q.id)}>
-                                  {busy.deletingQuoteId === q.id ? "Poistetaan..." : "Poista"}
-                                </Btn>
-                              </div>
-                            </div>
-
-                            <div style={{ marginTop: 10 }}>
-                              <Field label="Vaihda tarjousstatus">
-                                <Select value={normQuoteStatus(q.status)} onChange={(e) => changeQuoteStatus(q.id, e.target.value)}>
-                                  {QUOTE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-                                </Select>
-                              </Field>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div style={sx.card}>
-                      <Title eyebrow="Valittu tarjous" title="Tarjousnäkymä" />
-                      {selectedQuote ? (
-                        <div style={{ display: "grid", gap: 14 }}>
-                          <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
-                            <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 8 }}>
-                              {selectedQuote.title || "Tarjous"}
-                            </div>
-
-                            <div style={{ lineHeight: 1.7, fontSize: 14, color: "rgba(244,241,233,.72)" }}>
-                              <div><strong>Tarjousnumero:</strong> {selectedQuote.quote_number || "-"}</div>
-                              <div><strong>Asiakas:</strong> {selectedQuote.client?.name || "-"}{selectedQuote.client?.company_name ? ` / ${selectedQuote.client.company_name}` : ""}</div>
-                              <div><strong>Status:</strong> {normQuoteStatus(selectedQuote.status)}</div>
-                              <div><strong>Päiväys:</strong> {fmtDate(selectedQuote.issue_date)} · <strong>Voimassa asti:</strong> {fmtDate(selectedQuote.valid_until)}</div>
-                            </div>
-                          </div>
-
+                        <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
+                          <Title eyebrow="Tarjoukset" title="Asiakkaan tarjoukset" />
                           <table style={sx.table}>
                             <thead>
                               <tr>
-                                {["#", "Kuvaus", "Määrä", "Yks.hinta", "Rivisumma"].map((h) => (
+                                {["Tarjous", "Status", "Päiväys", "Voimassa", "Laskutus", "Yhteensä", ""].map((h) => (
                                   <th key={h} style={sx.th}>{h}</th>
                                 ))}
                               </tr>
                             </thead>
                             <tbody>
-                              {selectedQuote.lines.map((l, i) => (
-                                <tr key={l.id}>
-                                  <td style={sx.td}>{i + 1}</td>
-                                  <td style={{ ...sx.td, fontWeight: 700 }}>{l.description || "-"}</td>
-                                  <td style={sx.td}>{num(l.quantity)}</td>
-                                  <td style={sx.td}>{eur(l.unit_price)}</td>
-                                  <td style={{ ...sx.td, fontWeight: 800 }}>{eur(l.line_total)}</td>
+                              {selectedClientQuotes.map((q) => (
+                                <tr key={q.id}>
+                                  <td style={{ ...sx.td, fontWeight: 700 }}>
+                                    {q.title || "Tarjous"}
+                                    <div style={{ fontSize: 12, color: "rgba(244,241,233,.56)" }}>{q.quote_number || "-"}</div>
+                                  </td>
+                                  <td style={sx.td}>{normQuoteStatus(q.status)}</td>
+                                  <td style={sx.td}>{fmtDate(q.issue_date)}</td>
+                                  <td style={sx.td}>{fmtDate(q.valid_until)}</td>
+                                  <td style={sx.td}>{normInvoiceStatus(q.invoice_status)}</td>
+                                  <td style={{ ...sx.td, fontWeight: 800 }}>{eur(q.total)}</td>
+                                  <td style={sx.td}><Btn variant="ghost" onClick={() => fillQuote(q)}>Avaa</Btn></td>
                                 </tr>
                               ))}
                             </tbody>
                           </table>
-
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                            <Metric title="Veroton" value={eur(selectedQuote.subtotal)} sub="" />
-                            <Metric title="ALV" value={eur(selectedQuote.vat_amount)} sub="" />
-                            <Metric title="Yhteensä" value={eur(selectedQuote.total)} sub="" accent />
-                          </div>
-
-                          {selectedQuote.notes && (
-                            <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)", whiteSpace: "pre-wrap", lineHeight: 1.7 }}>
-                              {selectedQuote.notes}
-                            </div>
-                          )}
                         </div>
+                      </div>
+                    ) : (
+                      <div style={{ color: "rgba(244,241,233,.58)" }}>Valitse asiakas listalta.</div>
+                    )}
+                  </div>
+                </div>
+              </section>
+          )}
+
+          {view === "kanban" && (
+            <section>
+              <Title eyebrow="Myyntiputki" title="Kanban" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
+              <div style={{ display: "grid", gridTemplateColumns: `repeat(${CLIENT_STATUSES.length}, minmax(260px,1fr))`, gap: 14, overflowX: "auto", alignItems: "start" }}>
+                {CLIENT_STATUSES.map((col) => (
+                  <div key={col} style={{ ...sx.card, minWidth: 260, padding: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid rgba(231,223,178,.08)" }}>
+                      <strong>{col}</strong>
+                      <span style={{ minWidth: 32, height: 32, borderRadius: 999, display: "grid", placeItems: "center", background: "rgba(231,223,178,.08)", border: "1px solid rgba(231,223,178,.10)", color: "#d9c98a", fontWeight: 800 }}>
+                        {kanban[col]?.length || 0}
+                      </span>
+                    </div>
+
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {(kanban[col] || []).length ? (
+                        kanban[col].map((c) => (
+                          <div key={c.id} style={{ padding: 14, borderRadius: 16, background: "linear-gradient(180deg, rgba(14,14,20,.95), rgba(10,10,15,.98))", border: "1px solid rgba(231,223,178,.08)" }}>
+                            <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>{c.name || "-"}</div>
+                            <div style={{ fontSize: 13, color: "rgba(244,241,233,.66)", marginBottom: 6 }}>{c.company_name || "Ei yritysnimeä"}</div>
+                            <div style={{ fontSize: 13, color: "rgba(244,241,233,.56)", marginBottom: 10 }}>
+                              {c.email || "-"} {c.phone ? `• ${c.phone}` : ""}
+                            </div>
+
+                            <Field label="Vaihda status">
+                              <Select value={normClientStatus(c.status)} onChange={(e) => changeClientStatus(c.id, e.target.value)}>
+                                {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                              </Select>
+                            </Field>
+
+                            <div style={{ display: "flex", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                              <Btn variant="ghost" onClick={() => { setSelectedClientId(c.id); fillClient(c); }}>Avaa</Btn>
+                              <Btn variant="danger" onClick={() => removeClient(c.id)}>
+                                {busy.deletingClientId === c.id ? "Poistetaan..." : "Poista"}
+                              </Btn>
+                            </div>
+                          </div>
+                        ))
                       ) : (
-                        <div style={{ color: "rgba(244,241,233,.58)" }}>Valitse tarjous listalta.</div>
+                        <div style={{ padding: 14, borderRadius: 14, border: "1px dashed rgba(231,223,178,.14)", color: "rgba(244,241,233,.48)", textAlign: "center" }}>
+                          Ei asiakkaita
+                        </div>
                       )}
                     </div>
                   </div>
-                </div>
-              </section>
-            )}
+                ))}
+              </div>
+            </section>
+          )}
 
-            {view === "finance" && (
-              <section>
-                <Title eyebrow="Kassavirta ja kuukausitalous" title="Talous" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
+          {view === "quotes" && (
+            <section>
+              <Title eyebrow="Tarjousten hallinta" title="Tarjoukset" right={<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}><Btn variant="ghost" onClick={resetQuote}>Uusi tarjous</Btn><Btn variant="ghost" onClick={generateQuoteNumber}>{busy.generatingQuoteNumber ? "Haetaan..." : "Generoi nro"}</Btn><Btn variant="ghost" onClick={loadData}>Päivitä</Btn></div>} />
 
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
-                  <Metric title="Liikevaihto" value={eur(financeSummary.revenue)} sub="Suodatetut kuukaudet" accent />
-                  <Metric title="Kulut" value={eur(financeSummary.expenses)} sub="Suodatetut kuukaudet" />
-                  <Metric title="Tulos" value={eur(financeSummary.profit)} sub="Liikevaihto - kulut" />
-                  <Metric title="Tavoite" value={eur(financeSummary.target)} sub="Yhteensä" />
-                  <Metric title="Kassavirta" value={eur(financeSummary.cashflow)} sub="Suodatetut tapahtumat" />
-                  <Metric
-                    title="Ennusteet"
-                    value={eur(
-                      filteredCashflow
-                        .filter((r) => String(r.type || "") === "Ennuste")
-                        .reduce((s, r) => s + num(r.amount), 0)
-                    )}
-                    sub="Ennuste-rivit"
-                  />
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
-                  <div style={sx.cardDark}>
-                    <Title eyebrow={financeForm.id ? "Muokkaus" : "Uusi kuukausirivi"} title="finance_monthly" />
-
-                    <form onSubmit={saveFinance}>
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Kuukausi *"><Input value={financeForm.month} onChange={(e) => setFinanceForm({ ...financeForm, month: e.target.value })} placeholder="2026-03" /></Field>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Liikevaihto"><Input type="number" step="0.01" value={financeForm.revenue} onChange={(e) => setFinanceForm({ ...financeForm, revenue: e.target.value })} /></Field>
-                          <Field label="Kulut"><Input type="number" step="0.01" value={financeForm.expenses} onChange={(e) => setFinanceForm({ ...financeForm, expenses: e.target.value })} /></Field>
-                        </div>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Tulos (valinnainen)"><Input type="number" step="0.01" value={financeForm.profit} onChange={(e) => setFinanceForm({ ...financeForm, profit: e.target.value })} /></Field>
-                          <Field label="Tavoite"><Input type="number" step="0.01" value={financeForm.target} onChange={(e) => setFinanceForm({ ...financeForm, target: e.target.value })} /></Field>
-                        </div>
-
-                        <Field label="Muistiinpanot"><TextArea value={financeForm.notes} onChange={(e) => setFinanceForm({ ...financeForm, notes: e.target.value })} /></Field>
-
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <Btn type="submit">{busy.finance ? "Tallennetaan..." : financeForm.id ? "Päivitä kuukausi" : "Lisää kuukausi"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetFinance}>Tyhjennä</Btn>
-                        </div>
-                      </div>
-                    </form>
-
-                    <div style={{ height: 1, background: "rgba(231,223,178,.08)", margin: "20px 0" }} />
-
-                    <Title eyebrow={cashflowForm.id ? "Muokkaus" : "Uusi kassavirtarivi"} title="cashflow_events" />
-
-                    <form onSubmit={saveCashflow}>
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Päivä *"><Input type="date" value={cashflowForm.event_date} onChange={(e) => setCashflowForm({ ...cashflowForm, event_date: e.target.value })} /></Field>
-
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Summa"><Input type="number" step="0.01" value={cashflowForm.amount} onChange={(e) => setCashflowForm({ ...cashflowForm, amount: e.target.value })} /></Field>
-                          <Field label="Tyyppi">
-                            <Select value={cashflowForm.type} onChange={(e) => setCashflowForm({ ...cashflowForm, type: e.target.value })}>
-                              {CASHFLOW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                            </Select>
-                          </Field>
-                        </div>
-
-                        <Field label="Kuvaus *"><Input value={cashflowForm.description} onChange={(e) => setCashflowForm({ ...cashflowForm, description: e.target.value })} /></Field>
-                        <Field label="Muistiinpanot"><TextArea value={cashflowForm.notes} onChange={(e) => setCashflowForm({ ...cashflowForm, notes: e.target.value })} /></Field>
-
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <Btn type="submit">{busy.cashflow ? "Tallennetaan..." : cashflowForm.id ? "Päivitä kassavirta" : "Lisää kassavirta"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetCashflow}>Tyhjennä</Btn>
-                        </div>
-                      </div>
-                    </form>
-                  </div>
-
-                  <div style={{ display: "grid", gap: 18 }}>
-                    <div style={sx.card}>
-                      <Title
-                        eyebrow="Kuukausitalous"
-                        title="finance_monthly-rivit"
-                        right={
-                          <Field label="Suodata kuukautta">
-                            <Input value={financeFilter} onChange={(e) => setFinanceFilter(e.target.value)} placeholder="2026-03" style={{ width: 180 }} />
-                          </Field>
-                        }
-                      />
-
-                      <table style={sx.table}>
-                        <thead>
-                          <tr>
-                            {["Kuukausi", "Liikevaihto", "Kulut", "Tulos", "Tavoite", "Liikennevalo", "", ""].map((h) => (
-                              <th key={h} style={sx.th}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredFinance.map((r) => {
-                            const p =
-                              r.profit !== null && r.profit !== undefined
-                                ? num(r.profit)
-                                : num(r.revenue) - num(r.expenses);
-                            const tl = traffic(num(r.revenue), num(r.target || MONTHLY_TARGET_DEFAULT));
-
-                            return (
-                              <tr key={r.id}>
-                                <td style={{ ...sx.td, fontWeight: 700 }}>{r.month || "-"}</td>
-                                <td style={sx.td}>{eur(r.revenue)}</td>
-                                <td style={sx.td}>{eur(r.expenses)}</td>
-                                <td style={{ ...sx.td, fontWeight: 800 }}>{eur(p)}</td>
-                                <td style={sx.td}>{eur(r.target)}</td>
-                                <td style={sx.td}>
-                                  <StatPill label={tl.label} good={tl.label === "Vihreä"} warn={tl.label === "Keltainen"} danger={tl.label === "Punainen"} />
-                                </td>
-                                <td style={sx.td}>
-                                  <Btn
-                                    variant="ghost"
-                                    onClick={() =>
-                                      setFinanceForm({
-                                        ...emptyFinance,
-                                        ...r,
-                                        revenue: String(r.revenue ?? ""),
-                                        expenses: String(r.expenses ?? ""),
-                                        profit: String(r.profit ?? ""),
-                                        target: String(r.target ?? ""),
-                                      })
-                                    }
-                                  >
-                                    Muokkaa
-                                  </Btn>
-                                </td>
-                                <td style={sx.td}>
-                                  <Btn variant="danger" onClick={() => removeFinance(r.id)}>
-                                    {busy.deletingFinanceId === r.id ? "Poistetaan..." : "Poista"}
-                                  </Btn>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div style={sx.card}>
-                      <Title
-                        eyebrow="Kassavirrat"
-                        title="cashflow_events-rivit"
-                        right={
-                          <Field label="Tyyppi">
-                            <Select value={cashflowFilter} onChange={(e) => setCashflowFilter(e.target.value)} style={{ width: 180 }}>
-                              <option value="Kaikki">Kaikki</option>
-                              {CASHFLOW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                            </Select>
-                          </Field>
-                        }
-                      />
-
-                      <table style={sx.table}>
-                        <thead>
-                          <tr>
-                            {["Päivä", "Tyyppi", "Kuvaus", "Summa", "Kuukausi", "", ""].map((h) => (
-                              <th key={h} style={sx.th}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredCashflow.map((r) => (
-                            <tr key={r.id}>
-                              <td style={{ ...sx.td, fontWeight: 700 }}>{fmtDate(r.event_date)}</td>
-                              <td style={sx.td}>{r.type || "-"}</td>
-                              <td style={sx.td}>{r.description || "-"}</td>
-                              <td style={{ ...sx.td, fontWeight: 800, color: num(r.amount) >= 0 ? "#dfffe8" : "#ffd8de" }}>{eur(r.amount)}</td>
-                              <td style={sx.td}>{ymKey(r.event_date)}</td>
-                              <td style={sx.td}>
-                                <Btn
-                                  variant="ghost"
-                                  onClick={() =>
-                                    setCashflowForm({
-                                      ...emptyCashflow,
-                                      ...r,
-                                      event_date: r.event_date ? String(r.event_date).slice(0, 10) : "",
-                                      amount: String(r.amount ?? ""),
-                                    })
-                                  }
-                                >
-                                  Muokkaa
-                                </Btn>
-                              </td>
-                              <td style={sx.td}>
-                                <Btn variant="danger" onClick={() => removeCashflow(r.id)}>
-                                  {busy.deletingCashflowId === r.id ? "Poistetaan..." : "Poista"}
-                                </Btn>
-                              </td>
-                            </tr>
+              <div style={{ display: "grid", gridTemplateColumns: "560px 1fr", gap: 18 }}>
+                <div style={sx.cardDark}>
+                  <Title eyebrow={quoteForm.id ? "Muokkaus" : "Uusi tarjous"} title={quoteForm.id ? "Päivitä tarjous" : "Luo tarjous"} />
+                  <form onSubmit={saveQuote}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      <Field label="Asiakas *">
+                        <Select value={quoteForm.client_id} onChange={(e) => setQuoteForm({ ...quoteForm, client_id: e.target.value })}>
+                          <option value="">Valitse asiakas</option>
+                          {clients.map((c) => (
+                            <option key={c.id} value={c.id}>{c.name}{c.company_name ? ` – ${c.company_name}` : ""}</option>
                           ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
+                        </Select>
+                      </Field>
 
-            {view === "settings" && (
-              <section>
-                <Title
-                  eyebrow="Hinnoittelupohjat ja import-historia"
-                  title="Asetukset"
-                  right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>}
-                />
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Tarjousnumero"><Input value={quoteForm.quote_number} onChange={(e) => setQuoteForm({ ...quoteForm, quote_number: e.target.value })} /></Field>
+                        <Field label="Status">
+                          <Select value={quoteForm.status} onChange={(e) => setQuoteForm({ ...quoteForm, status: e.target.value })}>
+                            {QUOTE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
+                      </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
-                  <div style={sx.cardDark}>
-                    <Title
-                      eyebrow={templateForm.id ? "Muokkaus" : "Uusi hinnoittelupohja"}
-                      title="pricing_templates"
-                    />
+                      <Field label="Otsikko *"><Input value={quoteForm.title} onChange={(e) => setQuoteForm({ ...quoteForm, title: e.target.value })} /></Field>
 
-                    <form onSubmit={saveTemplate}>
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Nimi *"><Input value={templateForm.name} onChange={(e) => setTemplateForm({ ...templateForm, name: e.target.value })} /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Päiväys"><Input type="date" value={quoteForm.issue_date} onChange={(e) => updateIssueDate(e.target.value)} /></Field>
+                        <Field label="Voimassa asti"><Input type="date" value={quoteForm.valid_until} onChange={(e) => setQuoteForm({ ...quoteForm, validityPreset: "oma", valid_until: e.target.value })} /></Field>
+                      </div>
 
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Kategoria"><Input value={templateForm.category} onChange={(e) => setTemplateForm({ ...templateForm, category: e.target.value })} /></Field>
-                          <Field label="Yksikkö"><Input value={templateForm.unit} onChange={(e) => setTemplateForm({ ...templateForm, unit: e.target.value })} /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                        <Field label="Voimassaolo">
+                          <Select value={quoteForm.validityPreset} onChange={(e) => applyValidityPreset(e.target.value)}>
+                            {VALIDITY_PRESETS.map((s) => <option key={s} value={s}>{s === "oma" ? "oma" : `${s} pv`}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Voimassa pv"><Input type="number" value={quoteForm.quote_valid_days} onChange={(e) => setQuoteForm({ ...quoteForm, validityPreset: "oma", quote_valid_days: e.target.value })} /></Field>
+                        <Field label="Maksuehto pv"><Input type="number" value={quoteForm.payment_terms_days} onChange={(e) => setQuoteForm({ ...quoteForm, payment_terms_days: e.target.value })} /></Field>
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+                        <Field label="ALV %"><Input type="number" step="0.1" value={quoteForm.vat_rate} onChange={(e) => setQuoteForm({ ...quoteForm, vat_rate: e.target.value })} /></Field>
+                        <Field label="Laskutusstatus">
+                          <Select value={quoteForm.invoice_status} onChange={(e) => setQuoteForm({ ...quoteForm, invoice_status: e.target.value })}>
+                            {INVOICE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="B2B">
+                          <Select value={String(quoteForm.is_b2b)} onChange={(e) => setQuoteForm({ ...quoteForm, is_b2b: e.target.value === "true", vat_rate: e.target.value === "true" ? 0 : quoteForm.vat_rate })}>
+                            <option value="true">Yritys</option>
+                            <option value="false">Muu</option>
+                          </Select>
+                        </Field>
+                      </div>
+
+                      <div style={{ padding: 14, borderRadius: 16, background: "rgba(10,10,16,.58)", border: "1px solid rgba(231,223,178,.12)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                          <strong>Tarjousrivit</strong>
+                          <Btn type="button" variant="ghost" onClick={addDraftLine}>Lisää rivi</Btn>
                         </div>
 
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Yksikköhinta"><Input type="number" step="0.01" value={templateForm.unit_price} onChange={(e) => setTemplateForm({ ...templateForm, unit_price: e.target.value })} /></Field>
-                          <Field label="ALV %"><Input type="number" step="0.1" value={templateForm.vat_rate} onChange={(e) => setTemplateForm({ ...templateForm, vat_rate: e.target.value })} /></Field>
+                        <div style={{ display: "grid", gap: 10 }}>
+                          {quoteDraftLines.map((l, i) => (
+                            <div key={l.id} style={{ padding: 12, borderRadius: 14, background: "rgba(8,8,13,.68)", border: "1px solid rgba(231,223,178,.08)" }}>
+                              <div style={{ marginBottom: 8, fontSize: 12, color: "#d9c98a", fontWeight: 700 }}>Rivi {i + 1}</div>
+                              <Field label="Kuvaus"><Input value={l.description} onChange={(e) => updateDraftLine(l.id, "description", e.target.value)} /></Field>
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 10, marginTop: 10 }}>
+                                <Field label="Määrä"><Input type="number" step="0.01" value={l.quantity} onChange={(e) => updateDraftLine(l.id, "quantity", e.target.value)} /></Field>
+                                <Field label="Yksikköhinta ALV 0"><Input type="number" step="0.01" value={l.unit_price} onChange={(e) => updateDraftLine(l.id, "unit_price", e.target.value)} /></Field>
+                                <div style={{ display: "flex", alignItems: "end" }}><Btn type="button" variant="danger" onClick={() => removeDraftLine(l.id)}>Poista</Btn></div>
+                              </div>
+                              <div style={{ marginTop: 8, fontSize: 14 }}>Rivin summa: <strong>{eur(num(l.quantity) * num(l.unit_price))}</strong></div>
+                            </div>
+                          ))}
                         </div>
 
-                        <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                          <input type="checkbox" checked={!!templateForm.is_active} onChange={(e) => setTemplateForm({ ...templateForm, is_active: e.target.checked })} />
-                          <span style={{ fontSize: 14, fontWeight: 600 }}>Aktiivinen hinnoittelupohja</span>
-                        </label>
-
-                        <Field label="Kuvaus"><TextArea value={templateForm.description} onChange={(e) => setTemplateForm({ ...templateForm, description: e.target.value })} /></Field>
-
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <Btn type="submit">{busy.template ? "Tallennetaan..." : templateForm.id ? "Päivitä pohja" : "Lisää pohja"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetTemplate}>Tyhjennä</Btn>
+                        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                          <Metric title="Veroton" value={eur(quoteTotals.subtotal)} sub="ALV 0" />
+                          <Metric title="ALV" value={eur(quoteTotals.vatAmount)} sub={`${quoteForm.vat_rate}%`} />
+                          <Metric title="Yhteensä" value={eur(quoteTotals.total)} sub="Tarjoussumma" accent />
                         </div>
                       </div>
-                    </form>
+
+                      <Field label="Muistiinpanot"><TextArea value={quoteForm.notes} onChange={(e) => setQuoteForm({ ...quoteForm, notes: e.target.value })} /></Field>
+
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Btn type="submit">{busy.quote ? "Tallennetaan..." : quoteForm.id ? "Päivitä tarjous" : "Tallenna tarjous"}</Btn>
+                        <Btn type="button" variant="ghost" onClick={resetQuote}>Tyhjennä</Btn>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+
+                <div style={{ display: "grid", gap: 18 }}>
+                  <div style={sx.card}>
+                    <Title eyebrow="Hinnoittelupohjat" title="Lisää tarjousriviksi" />
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,minmax(0,1fr))", gap: 10 }}>
+                      {pricingTemplates.filter((t) => t.is_active).slice(0, 12).map((tpl) => (
+                        <div key={tpl.id} style={{ padding: 12, borderRadius: 14, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
+                          <strong>{tpl.name || tpl.service_name}</strong>
+                          <div style={{ marginTop: 6, fontSize: 13, color: "rgba(244,241,233,.62)" }}>
+                            {tpl.category || "-"} · {eur(tpl.unit_price)} / {tpl.unit || "kpl"}
+                          </div>
+                          <div style={{ marginTop: 10 }}><Btn variant="ghost" onClick={() => addTemplateToQuote(tpl)}>Lisää riviksi</Btn></div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
-                  <div style={{ display: "grid", gap: 18 }}>
-                    <div style={sx.card}>
-                      <Title
-                        eyebrow="Hinnoittelupohjat"
-                        title="pricing_templates-lista"
-                        right={
-                          <Field label="Hae">
-                            <Input value={templateFilter} onChange={(e) => setTemplateFilter(e.target.value)} placeholder="Nimi, kategoria..." style={{ width: 220 }} />
-                          </Field>
-                        }
-                      />
+                  <div style={sx.card}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12, marginBottom: 14 }}>
+                      <Field label="Hae tarjouksia"><Input value={quoteSearch} onChange={(e) => setQuoteSearch(e.target.value)} placeholder="Tarjousnumero, otsikko, asiakas..." /></Field>
+                      <Field label="Status-suodatus">
+                        <Select value={quoteStatusFilter} onChange={(e) => setQuoteStatusFilter(e.target.value)}>
+                          <option value="Kaikki">Kaikki</option>
+                          {QUOTE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                        </Select>
+                      </Field>
+                    </div>
 
-                      <div style={{ display: "grid", gap: 12 }}>
-                        {filteredTemplates.map((r) => (
-                          <div key={r.id} style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start", flexWrap: "wrap" }}>
-                              <div style={{ flex: 1, minWidth: 250 }}>
-                                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
-                                  <div style={{ fontSize: 18, fontWeight: 800 }}>{r.name || "-"}</div>
-                                  <span
-                                    style={{
-                                      ...sx.pill,
-                                      background: r.is_active ? "rgba(71,137,94,.18)" : "rgba(120,31,49,.18)",
-                                      border: r.is_active ? "1px solid rgba(125,212,156,.18)" : "1px solid rgba(255,93,129,.16)",
-                                    }}
-                                  >
-                                    {r.is_active ? "Aktiivinen" : "Pois käytöstä"}
-                                  </span>
-                                </div>
-
-                                <div style={{ lineHeight: 1.7, fontSize: 14, color: "rgba(244,241,233,.72)" }}>
-                                  <div><strong>Kategoria:</strong> {r.category || "-"}</div>
-                                  <div><strong>Yksikkö:</strong> {r.unit || "-"}</div>
-                                  <div><strong>Hinta:</strong> {eur(r.unit_price)} / {r.unit || "kpl"}</div>
-                                  <div><strong>ALV %:</strong> {num(r.vat_rate)}</div>
-                                </div>
-
-                                {r.description && (
-                                  <div style={{ marginTop: 8, color: "rgba(244,241,233,.62)", lineHeight: 1.6 }}>
-                                    {r.description}
-                                  </div>
-                                )}
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {filteredQuotes.map((q) => (
+                        <div
+                          key={q.id}
+                          style={{
+                            padding: 16,
+                            borderRadius: 16,
+                            background: selectedQuoteId === q.id ? "rgba(32,28,18,.92)" : "rgba(10,10,16,.78)",
+                            border: selectedQuoteId === q.id ? "1px solid rgba(231,223,178,.20)" : "1px solid rgba(231,223,178,.08)",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start", flexWrap: "wrap" }}>
+                            <div style={{ flex: 1, minWidth: 250 }}>
+                              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                                <div style={{ fontSize: 19, fontWeight: 800 }}>{q.title || "Tarjous"}</div>
+                                <span style={{ ...sx.pill, background: "rgba(231,223,178,.08)" }}>{normQuoteStatus(q.status)}</span>
+                                <span style={{ ...sx.pill, background: "rgba(71,137,94,.18)" }}>{normInvoiceStatus(q.invoice_status)}</span>
                               </div>
-
-                              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                                <Btn
-                                  variant="ghost"
-                                  onClick={() =>
-                                    setTemplateForm({
-                                      ...emptyTemplate,
-                                      ...r,
-                                      unit_price: String(r.unit_price ?? ""),
-                                      vat_rate: num(r.vat_rate ?? VAT_DEFAULT),
-                                    })
-                                  }
-                                >
-                                  Muokkaa
-                                </Btn>
-                                <Btn variant="ghost" onClick={() => { setView("quotes"); addTemplateToQuote(r); }}>
-                                  Lisää tarjousriviksi
-                                </Btn>
-                                <Btn variant="danger" onClick={() => removeTemplate(r.id)}>
-                                  {busy.deletingTemplateId === r.id ? "Poistetaan..." : "Poista"}
-                                </Btn>
+                              <div style={{ color: "rgba(244,241,233,.74)", lineHeight: 1.7, fontSize: 14 }}>
+                                <div><strong>Nro:</strong> {q.quote_number || "-"}</div>
+                                <div><strong>Asiakas:</strong> {q.client?.name || "-"}{q.client?.company_name ? ` / ${q.client.company_name}` : ""}</div>
+                                <div><strong>Voimassa:</strong> {fmtDate(q.valid_until)}</div>
+                                <div><strong>Lasku:</strong> {q.invoice_number || "-"}</div>
+                                <div><strong>Yhteensä:</strong> {eur(q.total)}</div>
                               </div>
                             </div>
+
+                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                              <Btn variant="ghost" onClick={() => setSelectedQuoteId(q.id)}>Avaa</Btn>
+                              <Btn variant="ghost" onClick={() => fillQuote(q)}>Muokkaa</Btn>
+                              <Btn variant="ghost" onClick={() => invoiceQuote(q.id)}>
+                                {busy.invoicingQuoteId === q.id ? "Laskutetaan..." : "Laskuta"}
+                              </Btn>
+                              <Btn variant="danger" onClick={() => removeQuote(q.id)}>{busy.deletingQuoteId === q.id ? "Poistetaan..." : "Poista"}</Btn>
+                            </div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div style={sx.card}>
-                      <Title
-                        eyebrow="Importit"
-                        title="Tarkempi import-historiaseuranta"
-                        right={
-                          <Field label="Hae">
-                            <Input value={importFilter} onChange={(e) => setImportFilter(e.target.value)} placeholder="Tyyppi, lähde, status..." style={{ width: 240 }} />
-                          </Field>
-                        }
-                      />
-
-                      <table style={sx.table}>
-                        <thead>
-                          <tr>
-                            {["Aika", "Tyyppi", "Lähde", "Status", "Rivejä", "Viesti"].map((h) => (
-                              <th key={h} style={sx.th}>{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredImports.map((r) => (
-                            <tr key={r.id}>
-                              <td style={{ ...sx.td, fontWeight: 700 }}>{fmtDateTime(r.imported_at)}</td>
-                              <td style={sx.td}>{r.import_type || "-"}</td>
-                              <td style={sx.td}>{r.source_name || "-"}</td>
-                              <td style={sx.td}>{r.status || "-"}</td>
-                              <td style={sx.td}>{r.row_count ?? "-"}</td>
-                              <td style={{ ...sx.td, color: "rgba(244,241,233,.68)" }}>{r.message || "-"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                        </div>
+                      ))}
                     </div>
                   </div>
+
+                  <div style={sx.card}>
+                    <Title eyebrow="Valittu tarjous" title="Tarjousnäkymä" />
+                    {selectedQuote ? (
+                      <div style={{ display: "grid", gap: 14 }}>
+                        <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
+                          <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 8 }}>{selectedQuote.title || "Tarjous"}</div>
+                          <div style={{ lineHeight: 1.7, fontSize: 14, color: "rgba(244,241,233,.72)" }}>
+                            <div><strong>Tarjousnumero:</strong> {selectedQuote.quote_number || "-"}</div>
+                            <div><strong>Asiakas:</strong> {selectedQuote.client?.name || "-"}{selectedQuote.client?.company_name ? ` / ${selectedQuote.client.company_name}` : ""}</div>
+                            <div><strong>Status:</strong> {normQuoteStatus(selectedQuote.status)}</div>
+                            <div><strong>Laskutus:</strong> {normInvoiceStatus(selectedQuote.invoice_status)} {selectedQuote.invoice_number ? ` / ${selectedQuote.invoice_number}` : ""}</div>
+                            <div><strong>Päiväys:</strong> {fmtDate(selectedQuote.issue_date)} · <strong>Voimassa asti:</strong> {fmtDate(selectedQuote.valid_until)}</div>
+                            <div><strong>Odotettu maksu:</strong> {fmtDate(selectedQuote.expected_payment_date)}</div>
+                          </div>
+                        </div>
+
+                        <table style={sx.table}>
+                          <thead><tr>{["#", "Kuvaus", "Määrä", "Yks.hinta", "Rivisumma"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr></thead>
+                          <tbody>
+                            {selectedQuote.lines.map((l, i) => (
+                              <tr key={l.id}>
+                                <td style={sx.td}>{i + 1}</td>
+                                <td style={{ ...sx.td, fontWeight: 700 }}>{l.description || "-"}</td>
+                                <td style={sx.td}>{num(l.quantity)}</td>
+                                <td style={sx.td}>{eur(l.unit_price)}</td>
+                                <td style={{ ...sx.td, fontWeight: 800 }}>{eur(l.line_total)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                          <Metric title="Veroton" value={eur(selectedQuote.subtotal)} sub="ALV 0 oletus" />
+                          <Metric title="ALV" value={eur(selectedQuote.vat_amount)} sub={`${selectedQuote.vat_rate || 0}%`} />
+                          <Metric title="Yhteensä" value={eur(selectedQuote.total)} sub="Tarjoussumma" accent />
+                        </div>
+
+                        {selectedQuote.notes && <div style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)", whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{selectedQuote.notes}</div>}
+                      </div>
+                    ) : <div style={{ color: "rgba(244,241,233,.58)" }}>Valitse tarjous listalta.</div>}
+                  </div>
                 </div>
-              </section>
-            )}
-          </>
-        )}
+              </div>
+            </section>
+          )}
+
+          {view === "finance" && (
+            <section>
+              <Title eyebrow="Kassavirta ja kuukausitalous" title="Talous" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
+                <Metric title="Liikevaihto" value={eur(financeSummary.revenue)} sub="Suodatetut kuukaudet" accent />
+                <Metric title="Kulut" value={eur(financeSummary.expenses)} sub="Suodatetut kuukaudet" />
+                <Metric title="Tulos" value={eur(financeSummary.profit)} sub="Liikevaihto - kulut" />
+                <Metric title="Tavoite" value={eur(financeSummary.target)} sub="Yhteensä" />
+                <Metric title="Kassavirta" value={eur(financeSummary.cashflow)} sub="Suodatetut tapahtumat" />
+                <Metric title="Ennusteet" value={eur(filteredCashflow.filter((r) => String(r.type || "") === "Ennuste").reduce((s, r) => s + num(r.amount), 0))} sub="Ennuste-rivit" />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
+                <div style={sx.cardDark}>
+                  <Title eyebrow={financeForm.id ? "Muokkaus" : "Uusi kuukausirivi"} title="finance_monthly" />
+                  <form onSubmit={saveFinance}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      <Field label="Kuukausi *"><Input value={financeForm.month} onChange={(e) => setFinanceForm({ ...financeForm, month: e.target.value })} placeholder="2026-03" /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Liikevaihto"><Input type="number" step="0.01" value={financeForm.revenue} onChange={(e) => setFinanceForm({ ...financeForm, revenue: e.target.value })} /></Field>
+                        <Field label="Kulut"><Input type="number" step="0.01" value={financeForm.expenses} onChange={(e) => setFinanceForm({ ...financeForm, expenses: e.target.value })} /></Field>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Tulos"><Input type="number" step="0.01" value={financeForm.profit} onChange={(e) => setFinanceForm({ ...financeForm, profit: e.target.value })} /></Field>
+                        <Field label="Tavoite"><Input type="number" step="0.01" value={financeForm.target} onChange={(e) => setFinanceForm({ ...financeForm, target: e.target.value })} /></Field>
+                      </div>
+                      <Field label="Muistiinpanot"><TextArea value={financeForm.notes} onChange={(e) => setFinanceForm({ ...financeForm, notes: e.target.value })} /></Field>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Btn type="submit">{busy.finance ? "Tallennetaan..." : financeForm.id ? "Päivitä kuukausi" : "Lisää kuukausi"}</Btn>
+                        <Btn type="button" variant="ghost" onClick={resetFinance}>Tyhjennä</Btn>
+                      </div>
+                    </div>
+                  </form>
+
+                  <div style={{ height: 1, background: "rgba(231,223,178,.08)", margin: "20px 0" }} />
+
+                  <Title eyebrow={cashflowForm.id ? "Muokkaus" : "Uusi kassavirtarivi"} title="cashflow_events" />
+                  <form onSubmit={saveCashflow}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      <Field label="Päivä *"><Input type="date" value={cashflowForm.event_date} onChange={(e) => setCashflowForm({ ...cashflowForm, event_date: e.target.value })} /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Summa"><Input type="number" step="0.01" value={cashflowForm.amount} onChange={(e) => setCashflowForm({ ...cashflowForm, amount: e.target.value })} /></Field>
+                        <Field label="Tyyppi">
+                          <Select value={cashflowForm.type} onChange={(e) => setCashflowForm({ ...cashflowForm, type: e.target.value })}>
+                            {CASHFLOW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </Select>
+                        </Field>
+                      </div>
+                      <Field label="Kuvaus *"><Input value={cashflowForm.description} onChange={(e) => setCashflowForm({ ...cashflowForm, description: e.target.value })} /></Field>
+                      <Field label="Muistiinpanot"><TextArea value={cashflowForm.notes} onChange={(e) => setCashflowForm({ ...cashflowForm, notes: e.target.value })} /></Field>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Btn type="submit">{busy.cashflow ? "Tallennetaan..." : cashflowForm.id ? "Päivitä kassavirta" : "Lisää kassavirta"}</Btn>
+                        <Btn type="button" variant="ghost" onClick={resetCashflow}>Tyhjennä</Btn>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+
+                <div style={{ display: "grid", gap: 18 }}>
+                  <div style={sx.card}>
+                    <Title eyebrow="Kuukausitalous" title="finance_monthly-rivit" right={<Field label="Suodata kuukautta"><Input value={financeFilter} onChange={(e) => setFinanceFilter(e.target.value)} placeholder="2026-03" style={{ width: 180 }} /></Field>} />
+                    <table style={sx.table}>
+                      <thead><tr>{["Kuukausi", "Liikevaihto", "Kulut", "Tulos", "Tavoite", "Liikennevalo", "", ""].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {filteredFinance.map((r) => {
+                          const p = r.profit !== null && r.profit !== undefined ? num(r.profit) : num(r.revenue) - num(r.expenses);
+                          const tl = traffic(num(r.revenue), num(r.target || MONTHLY_TARGET_DEFAULT));
+                          return (
+                            <tr key={r.id}>
+                              <td style={{ ...sx.td, fontWeight: 700 }}>{r.month || "-"}</td>
+                              <td style={sx.td}>{eur(r.revenue)}</td>
+                              <td style={sx.td}>{eur(r.expenses)}</td>
+                              <td style={{ ...sx.td, fontWeight: 800 }}>{eur(p)}</td>
+                              <td style={sx.td}>{eur(r.target)}</td>
+                              <td style={sx.td}><StatPill label={tl.label} good={tl.label === "Vihreä"} warn={tl.label === "Keltainen"} danger={tl.label === "Punainen"} /></td>
+                              <td style={sx.td}><Btn variant="ghost" onClick={() => setFinanceForm({ ...emptyFinance, ...r, revenue: String(r.revenue ?? ""), expenses: String(r.expenses ?? ""), profit: String(r.profit ?? ""), target: String(r.target ?? "") })}>Muokkaa</Btn></td>
+                              <td style={sx.td}><Btn variant="danger" onClick={() => removeFinance(r.id)}>{busy.deletingFinanceId === r.id ? "Poistetaan..." : "Poista"}</Btn></td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div style={sx.card}>
+                    <Title eyebrow="Kassavirrat" title="cashflow_events-rivit" right={<Field label="Tyyppi"><Select value={cashflowFilter} onChange={(e) => setCashflowFilter(e.target.value)} style={{ width: 180 }}><option value="Kaikki">Kaikki</option>{CASHFLOW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</Select></Field>} />
+                    <table style={sx.table}>
+                      <thead><tr>{["Päivä", "Tyyppi", "Kuvaus", "Summa", "Kuukausi", "", ""].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {filteredCashflow.map((r) => (
+                          <tr key={r.id}>
+                            <td style={{ ...sx.td, fontWeight: 700 }}>{fmtDate(r.event_date)}</td>
+                            <td style={sx.td}>{r.type || "-"}</td>
+                            <td style={sx.td}>{r.description || "-"}</td>
+                            <td style={{ ...sx.td, fontWeight: 800, color: num(r.amount) >= 0 ? "#dfffe8" : "#ffd8de" }}>{eur(r.amount)}</td>
+                            <td style={sx.td}>{ymKey(r.event_date)}</td>
+                            <td style={sx.td}><Btn variant="ghost" onClick={() => setCashflowForm({ ...emptyCashflow, ...r, event_date: r.event_date ? String(r.event_date).slice(0, 10) : "", amount: String(r.amount ?? "") })}>Muokkaa</Btn></td>
+                            <td style={sx.td}><Btn variant="danger" onClick={() => removeCashflow(r.id)}>{busy.deletingCashflowId === r.id ? "Poistetaan..." : "Poista"}</Btn></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {view === "calendar" && (
+            <section>
+              <Title eyebrow="Tapahtumien hallinta" title="Kalenteri" right={<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}><Btn variant="ghost" onClick={resetCalendar}>Uusi tapahtuma</Btn><Btn variant="ghost" onClick={loadData}>Päivitä</Btn></div>} />
+              <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
+                <div style={sx.cardDark}>
+                  <Title eyebrow={calendarForm.id ? "Muokkaus" : "Uusi tapahtuma"} title={calendarForm.id ? "Päivitä tapahtuma" : "Lisää tapahtuma"} />
+                  <form onSubmit={saveCalendarEvent}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      <Field label="Otsikko *"><Input value={calendarForm.title} onChange={(e) => setCalendarForm({ ...calendarForm, title: e.target.value })} /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Asiakas">
+                          <Select value={calendarForm.client_id} onChange={(e) => setCalendarForm({ ...calendarForm, client_id: e.target.value })}>
+                            <option value="">Ei asiakasta</option>
+                            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}{c.company_name ? ` – ${c.company_name}` : ""}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Tarjous">
+                          <Select value={calendarForm.quote_id} onChange={(e) => setCalendarForm({ ...calendarForm, quote_id: e.target.value })}>
+                            <option value="">Ei tarjousta</option>
+                            {quotes.map((q) => <option key={q.id} value={q.id}>{q.quote_number || q.title}</option>)}
+                          </Select>
+                        </Field>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Tyyppi">
+                          <Select value={calendarForm.event_type} onChange={(e) => setCalendarForm({ ...calendarForm, event_type: e.target.value })}>
+                            {CALENDAR_EVENT_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Status">
+                          <Select value={calendarForm.status} onChange={(e) => setCalendarForm({ ...calendarForm, status: e.target.value })}>
+                            {CALENDAR_EVENT_STATUSES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </Select>
+                        </Field>
+                      </div>
+                      <Field label="Alkaa"><Input type="datetime-local" value={calendarForm.start_at} onChange={(e) => setCalendarForm({ ...calendarForm, start_at: e.target.value })} /></Field>
+                      <Field label="Päättyy"><Input type="datetime-local" value={calendarForm.end_at} onChange={(e) => setCalendarForm({ ...calendarForm, end_at: e.target.value })} /></Field>
+                      <Field label="Sijainti"><Input value={calendarForm.location} onChange={(e) => setCalendarForm({ ...calendarForm, location: e.target.value })} /></Field>
+                      <Field label="Muistiinpanot"><TextArea value={calendarForm.notes} onChange={(e) => setCalendarForm({ ...calendarForm, notes: e.target.value })} /></Field>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Btn type="submit">{busy.calendar ? "Tallennetaan..." : calendarForm.id ? "Päivitä tapahtuma" : "Lisää tapahtuma"}</Btn>
+                        <Btn type="button" variant="ghost" onClick={resetCalendar}>Tyhjennä</Btn>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+
+                <div style={sx.card}>
+                  <Title eyebrow="Kalenteritapahtumat" title="Lista" right={<Field label="Hae"><Input value={calendarFilter} onChange={(e) => setCalendarFilter(e.target.value)} placeholder="Otsikko, sijainti..." style={{ width: 220 }} /></Field>} />
+                  <table style={sx.table}>
+                    <thead><tr>{["Aika", "Otsikko", "Tyyppi", "Status", "Asiakas", "Tarjous", "", ""].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr></thead>
+                    <tbody>
+                      {filteredCalendar.map((e) => (
+                        <tr key={e.id}>
+                          <td style={{ ...sx.td, fontWeight: 700 }}>{fmtDateTime(e.start_at)}</td>
+                          <td style={sx.td}>{e.title || "-"}</td>
+                          <td style={sx.td}>{e.event_type || "-"}</td>
+                          <td style={sx.td}>{e.status || "-"}</td>
+                          <td style={sx.td}>{clientMap.get(e.client_id)?.name || "-"}</td>
+                          <td style={sx.td}>{quoteMap.get(e.quote_id)?.quote_number || quoteMap.get(e.quote_id)?.title || "-"}</td>
+                          <td style={sx.td}><Btn variant="ghost" onClick={() => fillCalendar(e)}>Muokkaa</Btn></td>
+                          <td style={sx.td}><Btn variant="danger" onClick={() => removeCalendarEvent(e.id)}>{busy.deletingCalendarId === e.id ? "Poistetaan..." : "Poista"}</Btn></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {view === "settings" && (
+            <section>
+              <Title eyebrow="Hinnoittelupohjat ja import-historia" title="Asetukset" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
+              <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
+                <div style={sx.cardDark}>
+                  <Title eyebrow={templateForm.id ? "Muokkaus" : "Uusi hinnoittelupohja"} title="pricing_templates" />
+                  <form onSubmit={saveTemplate}>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      <Field label="Nimi *"><Input value={templateForm.name} onChange={(e) => setTemplateForm({ ...templateForm, name: e.target.value, service_name: e.target.value })} /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Kategoria"><Input value={templateForm.category} onChange={(e) => setTemplateForm({ ...templateForm, category: e.target.value })} /></Field>
+                        <Field label="Yksikkö"><Input value={templateForm.unit} onChange={(e) => setTemplateForm({ ...templateForm, unit: e.target.value })} /></Field>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                        <Field label="Yksikköhinta ALV 0"><Input type="number" step="0.01" value={templateForm.unit_price} onChange={(e) => setTemplateForm({ ...templateForm, unit_price: e.target.value })} /></Field>
+                        <Field label="ALV %"><Input type="number" step="0.1" value={templateForm.vat_rate} onChange={(e) => setTemplateForm({ ...templateForm, vat_rate: e.target.value })} /></Field>
+                      </div>
+                      <label style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        <input type="checkbox" checked={!!templateForm.is_active} onChange={(e) => setTemplateForm({ ...templateForm, is_active: e.target.checked })} />
+                        <span style={{ fontSize: 14, fontWeight: 600 }}>Aktiivinen hinnoittelupohja</span>
+                      </label>
+                      <Field label="Kuvaus"><TextArea value={templateForm.description} onChange={(e) => setTemplateForm({ ...templateForm, description: e.target.value })} /></Field>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        <Btn type="submit">{busy.template ? "Tallennetaan..." : templateForm.id ? "Päivitä pohja" : "Lisää pohja"}</Btn>
+                        <Btn type="button" variant="ghost" onClick={resetTemplate}>Tyhjennä</Btn>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+
+                <div style={{ display: "grid", gap: 18 }}>
+                  <div style={sx.card}>
+                    <Title eyebrow="Hinnoittelupohjat" title="pricing_templates-lista" right={<Field label="Hae"><Input value={templateFilter} onChange={(e) => setTemplateFilter(e.target.value)} placeholder="Nimi, kategoria..." style={{ width: 220 }} /></Field>} />
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {filteredTemplates.map((r) => (
+                        <div key={r.id} style={{ padding: 16, borderRadius: 16, background: "rgba(10,10,16,.78)", border: "1px solid rgba(231,223,178,.08)" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "start", flexWrap: "wrap" }}>
+                            <div style={{ flex: 1, minWidth: 250 }}>
+                              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                                <div style={{ fontSize: 18, fontWeight: 800 }}>{r.name || r.service_name || "-"}</div>
+                                <span style={{ ...sx.pill, background: r.is_active ? "rgba(71,137,94,.18)" : "rgba(120,31,49,.18)", border: r.is_active ? "1px solid rgba(125,212,156,.18)" : "1px solid rgba(255,93,129,.16)" }}>
+                                  {r.is_active ? "Aktiivinen" : "Pois käytöstä"}
+                                </span>
+                              </div>
+                              <div style={{ lineHeight: 1.7, fontSize: 14, color: "rgba(244,241,233,.72)" }}>
+                                <div><strong>Kategoria:</strong> {r.category || "-"}</div>
+                                <div><strong>Yksikkö:</strong> {r.unit || "-"}</div>
+                                <div><strong>Hinta:</strong> {eur(r.unit_price)} / {r.unit || "kpl"}</div>
+                                <div><strong>ALV %:</strong> {num(r.vat_rate)}</div>
+                              </div>
+                              {r.description && <div style={{ marginTop: 8, color: "rgba(244,241,233,.62)", lineHeight: 1.6 }}>{r.description}</div>}
+                            </div>
+
+                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                              <Btn variant="ghost" onClick={() => setTemplateForm({ ...emptyTemplate, ...r, unit_price: String(r.unit_price ?? ""), vat_rate: num(r.vat_rate ?? VAT_DEFAULT) })}>Muokkaa</Btn>
+                              <Btn variant="ghost" onClick={() => { setView("quotes"); addTemplateToQuote(r); }}>Lisää tarjousriviksi</Btn>
+                              <Btn variant="danger" onClick={() => removeTemplate(r.id)}>{busy.deletingTemplateId === r.id ? "Poistetaan..." : "Poista"}</Btn>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={sx.card}>
+                    <Title eyebrow="Importit" title="Tarkempi import-historiaseuranta" right={<Field label="Hae"><Input value={importFilter} onChange={(e) => setImportFilter(e.target.value)} placeholder="Tyyppi, lähde, status..." style={{ width: 240 }} /></Field>} />
+                    <table style={sx.table}>
+                      <thead><tr>{["Aika", "Tyyppi", "Lähde", "Status", "Rivejä", "Viesti"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {filteredImports.map((r) => (
+                          <tr key={r.id}>
+                            <td style={{ ...sx.td, fontWeight: 700 }}>{fmtDateTime(r.imported_at)}</td>
+                            <td style={sx.td}>{r.import_type || "-"}</td>
+                            <td style={sx.td}>{r.source_name || "-"}</td>
+                            <td style={sx.td}>{r.status || "-"}</td>
+                            <td style={sx.td}>{r.row_count ?? "-"}</td>
+                            <td style={{ ...sx.td, color: "rgba(244,241,233,.68)" }}>{r.message || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+        </>
       </div>
     </div>
   );
