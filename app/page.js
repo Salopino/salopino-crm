@@ -156,6 +156,15 @@ const emptyAccountingMonthly = {
   notes: "",
 };
 
+const emptyAiImport = {
+  month: "",
+  source_system: "Netvisor",
+  document_type: "Tuloslaskelma",
+  file_name: "",
+  file_url: "",
+  raw_text: "",
+};
+
 const eur = (v) =>
   new Intl.NumberFormat("fi-FI", {
     style: "currency",
@@ -203,6 +212,98 @@ const traffic = (value, target) => {
   if (ratio >= 0.7) return { label: "Keltainen", color: "#fff1c7" };
   return { label: "Punainen", color: "#ffd7df" };
 };
+
+function safeDiv(a, b) {
+  if (!b || Number(b) === 0) return 0;
+  return Number(a || 0) / Number(b || 0);
+}
+
+function round2(v) {
+  return Math.round(Number(v || 0) * 100) / 100;
+}
+
+function extractMoneyFromLine(line) {
+  const normalized = String(line || "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const match = normalized.match(/(-?\d[\d\s.,]*)$/);
+  if (!match) return null;
+
+  let raw = match[1].replace(/\s/g, "");
+  if (raw.includes(",") && raw.includes(".")) {
+    if (raw.lastIndexOf(",") > raw.lastIndexOf(".")) {
+      raw = raw.replace(/\./g, "").replace(",", ".");
+    } else {
+      raw = raw.replace(/,/g, "");
+    }
+  } else if (raw.includes(",")) {
+    raw = raw.replace(/\./g, "").replace(",", ".");
+  }
+
+  const value = Number(raw);
+  return Number.isNaN(value) ? null : value;
+}
+
+function parseAccountingText(rawText, month = "", source_system = "Netvisor") {
+  const raw = String(rawText || "").trim();
+  const lines = raw
+    .split("\n")
+    .map((r) => r.trim())
+    .filter(Boolean);
+
+  const take = (...keys) => {
+    const lowerKeys = keys.map((k) => String(k).toLowerCase());
+    for (const line of lines) {
+      const l = line.toLowerCase();
+      if (lowerKeys.some((k) => l.includes(k))) {
+        const val = extractMoneyFromLine(line);
+        if (val !== null) return val;
+      }
+    }
+    return 0;
+  };
+
+  const revenue = take("liikevaihto", "myynti");
+  const other_income = take("liiketoiminnan muut tuotot", "muut tuotot");
+  const materials_and_services = take("materiaalit ja palvelut");
+  const personnel_expenses = take("henkilöstökulut", "palkat ja palkkiot", "palkkakulut");
+  const other_operating_expenses = take("liiketoiminnan muut kulut", "muut liiketoiminnan kulut");
+  const depreciation = take("poistot", "suunnitelman mukaiset poistot");
+  const operating_profit = take("liikevoitto", "liiketulos");
+  const financial_items = take("rahoitustuotot ja -kulut", "rahoituskulut", "rahoitustuotot");
+  const profit_before_appropriations = take("voitto ennen tilinpäätössiirtoja", "tilikauden tulos", "tilikauden voitto");
+
+  const balance_assets = take("vastaavaa yhteensä", "varat yhteensä", "taseen loppusumma");
+  const balance_liabilities = take("vastattavaa yhteensä", "velat ja oma pääoma yhteensä");
+  const equity = take("oma pääoma");
+  const cash_and_bank = take("rahat ja pankkisaamiset", "pankkisaamiset", "rahat");
+  const receivables = take("myyntisaamiset", "saamiset yhteensä", "lyhytaikaiset saamiset");
+  const payables = take("ostovelat", "lyhytaikainen vieras pääoma", "velat");
+
+  return {
+    id: null,
+    month,
+    source_system,
+    revenue,
+    other_income,
+    materials_and_services,
+    personnel_expenses,
+    other_operating_expenses,
+    depreciation,
+    operating_profit,
+    financial_items,
+    profit_before_appropriations,
+    balance_assets,
+    balance_liabilities,
+    equity,
+    cash_and_bank,
+    receivables,
+    payables,
+    notes: "Luotu AI-esitulkinnalla raakatekstistä. Tarkista ennen lopullista hyväksyntää.",
+  };
+}
 
 const sx = {
   page: {
@@ -479,13 +580,19 @@ export default function Page() {
   const [accountingDocumentForm, setAccountingDocumentForm] = useState(emptyAccountingDocument);
   const [accountingMonthlyForm, setAccountingMonthlyForm] = useState(emptyAccountingMonthly);
 
+  const [aiImportForm, setAiImportForm] = useState({
+    ...emptyAiImport,
+    month: today().slice(0, 7),
+  });
+  const [aiAccountingPreview, setAiAccountingPreview] = useState(null);
+  const [aiPreviewMetrics, setAiPreviewMetrics] = useState(null);
+
   const [crmSearch, setCrmSearch] = useState("");
   const [crmStatusFilter, setCrmStatusFilter] = useState("Kaikki");
   const [quoteSearch, setQuoteSearch] = useState("");
   const [quoteStatusFilter, setQuoteStatusFilter] = useState("Kaikki");
   const [calendarFilter, setCalendarFilter] = useState("");
   const [accountingFilter, setAccountingFilter] = useState("");
-  const [selectedQuoteId, setSelectedQuoteId] = useState(null);
 
   const [busy, setBusy] = useState({
     client: false,
@@ -500,6 +607,8 @@ export default function Page() {
     invoicingQuoteId: null,
     quoteCalendarId: null,
     quoteCashflowId: null,
+    aiAnalyze: false,
+    aiSave: false,
   });
 
   async function loadData() {
@@ -541,8 +650,6 @@ export default function Page() {
       setCalendarEvents(j.data || []);
       setAccountingDocuments(k.data || []);
       setAccountingMonthly(l.data || []);
-
-      if (!selectedQuoteId && f.data?.length) setSelectedQuoteId(f.data[0].id);
     } catch (err) {
       setError(err.message || "Datan haku epäonnistui.");
     } finally {
@@ -571,6 +678,29 @@ export default function Page() {
         .sort((a, b) => num(a.sort_order) - num(b.sort_order)),
     }));
   }, [quotes, quoteLines, clientMap]);
+
+  const latestAccounting = useMemo(() => accountingMonthly[0] || null, [accountingMonthly]);
+
+  const accountingMetrics = useMemo(() => {
+    const a = latestAccounting || {};
+    const monthlyBurn =
+      Math.abs(num(a.materials_and_services)) +
+      Math.abs(num(a.personnel_expenses)) +
+      Math.abs(num(a.other_operating_expenses));
+
+    const equityRatio = safeDiv(num(a.equity), num(a.balance_assets)) * 100;
+    const currentRatio = safeDiv(num(a.cash_and_bank) + num(a.receivables), num(a.payables));
+    const cashRunwayMonths = safeDiv(num(a.cash_and_bank), monthlyBurn);
+    const debtRatio = safeDiv(num(a.balance_liabilities), num(a.balance_assets)) * 100;
+
+    return {
+      equityRatio,
+      currentRatio,
+      cashRunwayMonths,
+      debtRatio,
+      monthlyBurn,
+    };
+  }, [latestAccounting]);
 
   const dashboard = useMemo(() => {
     const openTasks = tasks.filter(
@@ -609,8 +739,6 @@ export default function Page() {
     const monthTarget = num(latestMonth?.target || MONTHLY_TARGET_DEFAULT);
     const monthTraffic = traffic(monthRevenue, monthTarget);
 
-    const accountingLatest = accountingMonthly[0] || null;
-
     return {
       totalClients: clients.length,
       openTasks,
@@ -623,9 +751,9 @@ export default function Page() {
       monthRevenue,
       monthTarget,
       monthTraffic,
-      accountingLatest,
+      accountingLatest: latestAccounting,
     };
-  }, [clients, tasks, quotesEnriched, cashflowEvents, financeMonthly, accountingMonthly]);
+  }, [clients, tasks, quotesEnriched, cashflowEvents, financeMonthly, latestAccounting]);
 
   const quoteTotals = useMemo(() => {
     const subtotal = quoteDraftLines.reduce((s, l) => s + num(l.quantity) * num(l.unit_price), 0);
@@ -711,6 +839,12 @@ export default function Page() {
     setAccountingMonthlyForm(emptyAccountingMonthly);
   }
 
+  function resetAiImport() {
+    setAiImportForm({ ...emptyAiImport, month: today().slice(0, 7) });
+    setAiAccountingPreview(null);
+    setAiPreviewMetrics(null);
+  }
+
   async function generateQuoteNumber() {
     setBusy((b) => ({ ...b, generatingQuoteNumber: true }));
     try {
@@ -763,6 +897,98 @@ export default function Page() {
         sort_order: prev.length + 1,
       },
     ]);
+
+  function buildMetricsFromAccountingRow(row) {
+    const monthlyBurn =
+      Math.abs(num(row.materials_and_services)) +
+      Math.abs(num(row.personnel_expenses)) +
+      Math.abs(num(row.other_operating_expenses));
+
+    return {
+      equityRatio: round2(safeDiv(num(row.equity), num(row.balance_assets)) * 100),
+      currentRatio: round2(safeDiv(num(row.cash_and_bank) + num(row.receivables), num(row.payables))),
+      cashRunwayMonths: round2(safeDiv(num(row.cash_and_bank), monthlyBurn)),
+      debtRatio: round2(safeDiv(num(row.balance_liabilities), num(row.balance_assets)) * 100),
+      monthlyBurn: round2(monthlyBurn),
+    };
+  }
+
+  async function runAiAccountingAnalysis() {
+    setBusy((b) => ({ ...b, aiAnalyze: true }));
+    setError("");
+    try {
+      if (!aiImportForm.raw_text.trim()) {
+        throw new Error("Liitä raportin raakateksti AI-tulkintaa varten.");
+      }
+      if (!aiImportForm.month.trim()) {
+        throw new Error("Anna kuukausi muodossa YYYY-MM.");
+      }
+
+      const parsed = parseAccountingText(
+        aiImportForm.raw_text,
+        aiImportForm.month,
+        aiImportForm.source_system
+      );
+
+      setAiAccountingPreview(parsed);
+      setAiPreviewMetrics(buildMetricsFromAccountingRow(parsed));
+      setSuccess("AI-esitulkinta muodostettu. Tarkista ehdotus ja tallenna.");
+    } catch (err) {
+      setError(err.message || "AI-tulkinta epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, aiAnalyze: false }));
+    }
+  }
+
+  async function saveAiParsedAccounting() {
+    setBusy((b) => ({ ...b, aiSave: true }));
+    setError("");
+    try {
+      if (!aiAccountingPreview) throw new Error("AI-esitulkintaa ei ole muodostettu.");
+
+      const payload = {
+        ...aiAccountingPreview,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const q = await supabase.from("accounting_monthly").insert(payload);
+      if (q.error) throw q.error;
+
+      const docInsert = await supabase.from("accounting_documents").insert({
+        month: aiImportForm.month,
+        document_type: aiImportForm.document_type,
+        source_system: aiImportForm.source_system,
+        file_name: aiImportForm.file_name || `AI-tulkittu-${aiImportForm.month}`,
+        file_url: aiImportForm.file_url || "",
+        notes: "Tallennettu AI-esitulkinnan perusteella raakatekstistä.",
+        uploaded_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      });
+      if (docInsert.error) throw docInsert.error;
+
+      const logInsert = await supabase.from("import_logs").insert({
+        import_type: "AI kirjanpitotulkinta",
+        source_name: aiImportForm.file_name || aiImportForm.file_url || "raakateksti",
+        status: "Tallennettu",
+        row_count: 1,
+        message: `AI-esitulkinta tallennettu kuukaudelle ${aiImportForm.month}`,
+        source_system: aiImportForm.source_system,
+        file_name: aiImportForm.file_name || null,
+        month: aiImportForm.month || null,
+        imported_at: new Date().toISOString(),
+      });
+      if (logInsert.error) throw logInsert.error;
+
+      setSuccess("AI-esitulkinta tallennettu accounting_monthly + accounting_documents + import_logs.");
+      resetAiImport();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "AI-tulkinnan tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, aiSave: false }));
+    }
+  }
 
   async function saveClient(e) {
     e.preventDefault();
@@ -1128,14 +1354,14 @@ export default function Page() {
                 marginBottom: 14,
               }}
             >
-              SALOPINO CRM / TALOUSOHJAUS V6.3
+              SALOPINO CRM / TALOUSOHJAUS V6.4
             </div>
             <h1 style={{ margin: "0 0 10px", fontSize: 42, lineHeight: 1.05, fontWeight: 900 }}>
-              Tarjous → kalenteri → kassavirta → kirjanpito
+              Tarjous → kalenteri → kassavirta → kirjanpidon AI-esitulkinta
             </h1>
             <p style={{ margin: 0, color: "rgba(244,241,233,.74)", fontSize: 16, lineHeight: 1.7 }}>
-              Premium-ilmeinen operatiivinen ohjausnäkymä, jossa tarjoukset, aikataulutus,
-              kassavirta ja kirjanpidon aineistot pysyvät samassa johtamispaneelissa.
+              V6.4 nostaa talousnäkymään AI-esitulkinnan, kassatilanteen ja keskeiset kirjanpidolliset
+              mittarit niin, ettei tasetta ja tuloslaskelmaa tarvitse naputtaa käsin kenttä kentältä.
             </p>
           </div>
 
@@ -1223,7 +1449,7 @@ export default function Page() {
                   <Metric title="Toteutunut kassavirta" value={eur(dashboard.cashflowRealized)} sub="realized / tulot-menot" />
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 18 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 18 }}>
                   <div style={sx.card}>
                     <Title eyebrow="Kuukausiohjaus" title="CRM-talous" />
                     <div style={{ display: "grid", gap: 10 }}>
@@ -1242,21 +1468,28 @@ export default function Page() {
                   </div>
 
                   <div style={sx.card}>
-                    <Title eyebrow="Kirjanpito" title="Netvisor / accounting_monthly" />
+                    <Title eyebrow="Kirjanpito" title="Likviditeetti" />
                     <div style={{ display: "grid", gap: 10 }}>
-                      <div><strong>Kuukausi:</strong> {dashboard.accountingLatest?.month || "-"}</div>
-                      <div><strong>Liikevaihto:</strong> {eur(dashboard.accountingLatest?.revenue)}</div>
-                      <div><strong>Liiketulos:</strong> {eur(dashboard.accountingLatest?.operating_profit)}</div>
                       <div><strong>Pankki ja rahat:</strong> {eur(dashboard.accountingLatest?.cash_and_bank)}</div>
+                      <div><strong>Current ratio:</strong> {round2(accountingMetrics.currentRatio)}</div>
+                      <div><strong>Kassapuskuri:</strong> {round2(accountingMetrics.cashRunwayMonths)} kk</div>
                     </div>
                   </div>
 
                   <div style={sx.card}>
-                    <Title eyebrow="Operatiivinen näkymä" title="Johtamismalli" />
+                    <Title eyebrow="Kirjanpito" title="Vakavaraisuus" />
+                    <div style={{ display: "grid", gap: 10 }}>
+                      <div><strong>Oma pääoma:</strong> {eur(dashboard.accountingLatest?.equity)}</div>
+                      <div><strong>Omavaraisuusaste:</strong> {round2(accountingMetrics.equityRatio)} %</div>
+                      <div><strong>Velkaisuusaste:</strong> {round2(accountingMetrics.debtRatio)} %</div>
+                    </div>
+                  </div>
+
+                  <div style={sx.card}>
+                    <Title eyebrow="Operatiivinen malli" title="V6.4 AI-talous" />
                     <div style={{ lineHeight: 1.8, color: "rgba(244,241,233,.74)" }}>
-                      Tarjoukselta voidaan generoida kalenterivaraus ja kassavirtaennuste.
-                      Talousnäkymä yhdistää CRM-seurannan ja kirjanpidon kuukausitason raportoinnin
-                      samaan premium-paneeliin.
+                      Liitä raportin teksti talousnäkymään, aja AI-esitulkinta ja tallenna
+                      `accounting_monthly` ilman manuaalista numeronsyöttöä.
                     </div>
                   </div>
                 </div>
@@ -1603,9 +1836,76 @@ export default function Page() {
 
             {view === "finance" && (
               <section>
-                <Title eyebrow="Talous" title="Kirjanpito + CRM-talous" />
+                <Title eyebrow="Talous" title="Kirjanpito + CRM-talous + AI-esitulkinta" />
                 <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
                   <div style={sx.cardDark}>
+                    <form onSubmit={(e) => e.preventDefault()} style={{ marginBottom: 22 }}>
+                      <Title eyebrow="AI-tulkinta" title="Kirjanpidon AI-esitarkastus" />
+                      <div style={{ display: "grid", gap: 12 }}>
+                        <Field label="Kuukausi">
+                          <Input
+                            value={aiImportForm.month}
+                            onChange={(e) => setAiImportForm({ ...aiImportForm, month: e.target.value })}
+                            placeholder="2026-04"
+                          />
+                        </Field>
+                        <Field label="Lähdejärjestelmä">
+                          <Select
+                            value={aiImportForm.source_system}
+                            onChange={(e) => setAiImportForm({ ...aiImportForm, source_system: e.target.value })}
+                          >
+                            {SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Dokumenttityyppi">
+                          <Select
+                            value={aiImportForm.document_type}
+                            onChange={(e) => setAiImportForm({ ...aiImportForm, document_type: e.target.value })}
+                          >
+                            {ACCOUNTING_DOC_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Tiedoston nimi">
+                          <Input
+                            value={aiImportForm.file_name}
+                            onChange={(e) => setAiImportForm({ ...aiImportForm, file_name: e.target.value })}
+                            placeholder="esim. Netvisor_2026_04_tuloslaskelma.pdf"
+                          />
+                        </Field>
+                        <Field label="Tiedostolinkki">
+                          <Input
+                            value={aiImportForm.file_url}
+                            onChange={(e) => setAiImportForm({ ...aiImportForm, file_url: e.target.value })}
+                            placeholder="https://..."
+                          />
+                        </Field>
+                        <Field label="Raportin raakateksti">
+                          <TextArea
+                            value={aiImportForm.raw_text}
+                            onChange={(e) => setAiImportForm({ ...aiImportForm, raw_text: e.target.value })}
+                            style={{ minHeight: 220 }}
+                            placeholder="Liitä tähän Netvisorista tai PDF:stä kopioitu teksti. AI-esitulkinta poimii liikevaihdon, kulut, liiketuloksen, pankin, oman pääoman, saamiset ja velat."
+                          />
+                        </Field>
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <Btn type="button" onClick={runAiAccountingAnalysis}>
+                            {busy.aiAnalyze ? "Analysoidaan..." : "AI tarkasta"}
+                          </Btn>
+                          <Btn type="button" variant="ghost" onClick={resetAiImport}>
+                            Tyhjennä
+                          </Btn>
+                          <Btn
+                            type="button"
+                            variant="ghost"
+                            onClick={saveAiParsedAccounting}
+                            disabled={!aiAccountingPreview}
+                          >
+                            {busy.aiSave ? "Tallennetaan..." : "Tallenna AI-tulkinta"}
+                          </Btn>
+                        </div>
+                      </div>
+                    </form>
+
                     <form onSubmit={saveFinance} style={{ marginBottom: 22 }}>
                       <Title eyebrow="finance_monthly" title="CRM-kuukausi" />
                       <div style={{ display: "grid", gap: 12 }}>
@@ -1631,7 +1931,7 @@ export default function Page() {
                       </div>
                     </form>
 
-                    <form onSubmit={saveCashflow} style={{ marginBottom: 22 }}>
+                    <form onSubmit={saveCashflow}>
                       <Title eyebrow="cashflow_events" title="Kassavirta" />
                       <div style={{ display: "grid", gap: 12 }}>
                         <Field label="Päivä">
@@ -1654,84 +1954,48 @@ export default function Page() {
                         </div>
                       </div>
                     </form>
-
-                    <form onSubmit={saveAccountingDocument} style={{ marginBottom: 22 }}>
-                      <Title eyebrow="Netvisor / tiedostot / linkit" title="Kirjanpidon aineisto" />
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Kuukausi">
-                          <Input value={accountingDocumentForm.month} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, month: e.target.value })} placeholder="2026-04" />
-                        </Field>
-                        <Field label="Dokumenttityyppi">
-                          <Select value={accountingDocumentForm.document_type} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, document_type: e.target.value })}>
-                            {ACCOUNTING_DOC_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </Select>
-                        </Field>
-                        <Field label="Lähdejärjestelmä">
-                          <Select value={accountingDocumentForm.source_system} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, source_system: e.target.value })}>
-                            {SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </Select>
-                        </Field>
-                        <Field label="Tiedoston nimi">
-                          <Input value={accountingDocumentForm.file_name} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, file_name: e.target.value })} />
-                        </Field>
-                        <Field label="Tiedostolinkki / Netvisor-linkki">
-                          <Input value={accountingDocumentForm.file_url} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, file_url: e.target.value })} />
-                        </Field>
-                        <Field label="Muistiinpanot">
-                          <TextArea value={accountingDocumentForm.notes} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, notes: e.target.value })} />
-                        </Field>
-                        <div style={{ display: "flex", gap: 10 }}>
-                          <Btn type="submit">{busy.accountingDocument ? "Tallennetaan..." : "Tallenna aineisto"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetAccountingDocument}>Tyhjennä</Btn>
-                        </div>
-                      </div>
-                    </form>
-
-                    <form onSubmit={saveAccountingMonthly}>
-                      <Title eyebrow="accounting_monthly" title="Kirjanpidon kuukausitarkennus" />
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Kuukausi">
-                          <Input value={accountingMonthlyForm.month} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, month: e.target.value })} placeholder="2026-04" />
-                        </Field>
-                        <Field label="Lähdejärjestelmä">
-                          <Select value={accountingMonthlyForm.source_system} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, source_system: e.target.value })}>
-                            {SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}
-                          </Select>
-                        </Field>
-                        <Field label="Liikevaihto">
-                          <Input type="number" value={accountingMonthlyForm.revenue} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, revenue: e.target.value })} />
-                        </Field>
-                        <Field label="Muut liiketoiminnan kulut">
-                          <Input type="number" value={accountingMonthlyForm.other_operating_expenses} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, other_operating_expenses: e.target.value })} />
-                        </Field>
-                        <Field label="Liiketulos">
-                          <Input type="number" value={accountingMonthlyForm.operating_profit} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, operating_profit: e.target.value })} />
-                        </Field>
-                        <Field label="Pankki ja rahat">
-                          <Input type="number" value={accountingMonthlyForm.cash_and_bank} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, cash_and_bank: e.target.value })} />
-                        </Field>
-                        <Field label="Oma pääoma">
-                          <Input type="number" value={accountingMonthlyForm.equity} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, equity: e.target.value })} />
-                        </Field>
-                        <Field label="Muistiinpanot">
-                          <TextArea value={accountingMonthlyForm.notes} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, notes: e.target.value })} />
-                        </Field>
-                        <div style={{ display: "flex", gap: 10 }}>
-                          <Btn type="submit">{busy.accountingMonthly ? "Tallennetaan..." : "Tallenna tarkennus"}</Btn>
-                          <Btn type="button" variant="ghost" onClick={resetAccountingMonthly}>Tyhjennä</Btn>
-                        </div>
-                      </div>
-                    </form>
                   </div>
 
                   <div style={sx.card}>
-                    <Title eyebrow="Talousnäkymä" title="CRM + kirjanpito" />
+                    <Title eyebrow="Talousnäkymä" title="CRM + kirjanpito + mittarit" />
+
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
                       <Metric title="CRM-liikevaihto" value={eur(financeSummary.revenue)} sub="finance_monthly" accent />
                       <Metric title="CRM-kulut" value={eur(financeSummary.expenses)} sub="finance_monthly" />
                       <Metric title="CRM-tulos" value={eur(financeSummary.profit)} sub="finance_monthly" />
                       <Metric title="Kassavirta yhteensä" value={eur(financeSummary.cashflow)} sub="cashflow_events" />
                     </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
+                      <Metric title="Pankki ja rahat" value={eur(latestAccounting?.cash_and_bank)} sub="kirjanpito" />
+                      <Metric title="Omavaraisuusaste" value={`${round2(accountingMetrics.equityRatio)} %`} sub="equity / assets" />
+                      <Metric title="Current ratio" value={round2(accountingMetrics.currentRatio)} sub="cash + receivables / payables" />
+                      <Metric title="Kassapuskuri" value={`${round2(accountingMetrics.cashRunwayMonths)} kk`} sub="cash / monthly burn" />
+                    </div>
+
+                    {aiAccountingPreview && (
+                      <div
+                        style={{
+                          ...sx.cardDark,
+                          marginBottom: 18,
+                          background: "linear-gradient(180deg, rgba(32,23,44,.98), rgba(14,12,22,.98))",
+                        }}
+                      >
+                        <Title eyebrow="AI-esitulkinta" title={`Ehdotus kuukaudelle ${aiAccountingPreview.month || "-"}`} />
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 12 }}>
+                          <Metric title="Liikevaihto" value={eur(aiAccountingPreview.revenue)} sub="poimittu tekstistä" />
+                          <Metric title="Liiketulos" value={eur(aiAccountingPreview.operating_profit)} sub="poimittu tekstistä" />
+                          <Metric title="Pankki" value={eur(aiAccountingPreview.cash_and_bank)} sub="poimittu tekstistä" />
+                          <Metric title="Oma pääoma" value={eur(aiAccountingPreview.equity)} sub="poimittu tekstistä" />
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12 }}>
+                          <Metric title="Omavaraisuusaste" value={`${aiPreviewMetrics?.equityRatio ?? 0} %`} sub="AI-esitulkinta" />
+                          <Metric title="Current ratio" value={aiPreviewMetrics?.currentRatio ?? 0} sub="AI-esitulkinta" />
+                          <Metric title="Kassapuskuri" value={`${aiPreviewMetrics?.cashRunwayMonths ?? 0} kk`} sub="AI-esitulkinta" />
+                          <Metric title="Kulupoltto / kk" value={eur(aiPreviewMetrics?.monthlyBurn || 0)} sub="materiaalit + henkilöstö + muut kulut" />
+                        </div>
+                      </div>
+                    )}
 
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
                       <div>
