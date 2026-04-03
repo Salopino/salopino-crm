@@ -124,12 +124,7 @@ function buildAnalysis(data) {
   };
 }
 
-function buildAccountingRow({
-  month,
-  sourceSystem,
-  parsed,
-  analysis,
-}) {
+function buildAccountingRow({ month, sourceSystem, parsed, analysis }) {
   const revenue = safeNumber(parsed.revenue);
   const operatingProfit = safeNumber(parsed.operating_profit);
   const materials = safeNumber(parsed.materials);
@@ -176,8 +171,10 @@ async function parsePdfToText(file) {
 }
 
 async function extractAccountingWithAI(text) {
+  const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+
   const response = await openai.chat.completions.create({
-    model: "gpt-5.3",
+    model,
     temperature: 0,
     messages: [
       {
