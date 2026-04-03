@@ -3,6 +3,8 @@ import OpenAI from "openai";
 import pdfParse from "pdf-parse";
 import { createClient } from "@supabase/supabase-js";
 
+export const runtime = "nodejs";
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -14,14 +16,19 @@ const supabase = createClient(
 
 function safeNumber(v) {
   if (typeof v === "number" && Number.isFinite(v)) return v;
+
   if (typeof v === "string") {
     const cleaned = v
+      .replace(/\u00A0/g, " ")
       .replace(/\s/g, "")
-      .replace(/\./g, "")
+      .replace(/\(([^)]+)\)/, "-$1")
+      .replace(/\.(?=\d{3}(?:[,.]|$))/g, "")
       .replace(",", ".");
+
     const n = Number(cleaned);
     return Number.isFinite(n) ? n : 0;
   }
+
   return 0;
 }
 
@@ -67,7 +74,7 @@ function buildAnalysis(data) {
 
   if (operatingProfit < 0) {
     warnings.push("Liiketulos on negatiivinen.");
-    recommendations.push("Käy kulurakenne läpi ja priorisoi myyntiä sekä kannattavimmat palvelut.");
+    recommendations.push("Käy kulurakenne läpi ja priorisoi kannattavimmat palvelut.");
   } else {
     strengths.push("Liiketulos on positiivinen.");
   }
@@ -81,7 +88,7 @@ function buildAnalysis(data) {
 
   if (equityRatioPct < 20) {
     warnings.push("Omavaraisuusaste on matala.");
-    recommendations.push("Vahvista omaa pääomaa, hillitse kulukuormaa ja vältä heikosti kannattavia toimeksiantoja.");
+    recommendations.push("Vahvista omaa pääomaa ja vältä heikosti kannattavia toimeksiantoja.");
   } else if (equityRatioPct >= 35) {
     strengths.push("Omavaraisuusaste on hyvällä tasolla.");
   }
@@ -101,7 +108,7 @@ function buildAnalysis(data) {
   }
 
   if (recommendations.length === 0) {
-    recommendations.push("Jatka kuukausitason seurantaa ja vertaa toteumaa myyntitavoitteeseen sekä kassavirtaennusteeseen.");
+    recommendations.push("Jatka kuukausitason seurantaa ja vertaa toteumaa tavoitteeseen sekä kassavirtaennusteeseen.");
   }
 
   return {
@@ -117,37 +124,65 @@ function buildAnalysis(data) {
   };
 }
 
-export async function POST(req) {
-  try {
-    const formData = await req.formData();
-    const file = formData.get("file");
-    const month = String(formData.get("month") || "").trim();
-    const sourceSystem = String(formData.get("source_system") || "Netvisor").trim();
-    const documentType = String(formData.get("document_type") || "Tuloslaskelma").trim();
+function buildAccountingRow({
+  month,
+  sourceSystem,
+  parsed,
+  analysis,
+}) {
+  const revenue = safeNumber(parsed.revenue);
+  const operatingProfit = safeNumber(parsed.operating_profit);
+  const materials = safeNumber(parsed.materials);
+  const personnel = safeNumber(parsed.personnel);
+  const other = safeNumber(parsed.other);
+  const depreciation = safeNumber(parsed.depreciation);
+  const equity = safeNumber(parsed.equity);
+  const cash = safeNumber(parsed.cash);
+  const receivables = safeNumber(parsed.receivables);
+  const payables = safeNumber(parsed.payables);
+  const assets = safeNumber(parsed.assets);
 
-    if (!file) {
-      return NextResponse.json({ error: "Tiedosto puuttuu." }, { status: 400 });
-    }
+  return {
+    month,
+    source_system: sourceSystem,
+    revenue,
+    other_income: 0,
+    materials_and_services: materials,
+    personnel_expenses: personnel,
+    other_operating_expenses: other,
+    depreciation,
+    operating_profit: operatingProfit,
+    financial_items: 0,
+    profit_before_appropriations: operatingProfit,
+    balance_assets: assets,
+    balance_liabilities: assets - equity,
+    equity,
+    cash_and_bank: cash,
+    receivables,
+    payables,
+    notes:
+      "Tallennettu AI accounting importilla. " +
+      `Warnings: ${analysis.warnings.join(" | ") || "-"}. ` +
+      `Recommendations: ${analysis.recommendations.join(" | ") || "-"}`,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
 
-    if (!month) {
-      return NextResponse.json({ error: "Kuukausi puuttuu." }, { status: 400 });
-    }
+async function parsePdfToText(file) {
+  const buffer = Buffer.from(await file.arrayBuffer());
+  const pdfData = await pdfParse(buffer);
+  return String(pdfData.text || "");
+}
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const pdfData = await pdfParse(buffer);
-    const text = String(pdfData.text || "").slice(0, 18000);
-
-    if (!text.trim()) {
-      return NextResponse.json({ error: "PDF:stä ei saatu luettua tekstiä." }, { status: 400 });
-    }
-
-    const response = await openai.chat.completions.create({
-      model: "gpt-5.3",
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content: `
+async function extractAccountingWithAI(text) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-5.3",
+    temperature: 0,
+    messages: [
+      {
+        role: "system",
+        content: `
 Olet suomalaisen pk-yrityksen kirjanpidon analysoija.
 
 Poimi tekstistä seuraavat kentät:
@@ -184,60 +219,69 @@ Palauta VAIN validi JSON tässä muodossa:
   "payables": 0,
   "assets": 0
 }
-          `.trim(),
-        },
-        {
-          role: "user",
-          content: text,
-        },
-      ],
-    });
+        `.trim(),
+      },
+      {
+        role: "user",
+        content: text,
+      },
+    ],
+  });
 
-    const raw = response.choices?.[0]?.message?.content || "";
-    const clean = cleanJsonText(raw);
-    const parsed = JSON.parse(clean);
+  const raw = response.choices?.[0]?.message?.content || "";
+  const clean = cleanJsonText(raw);
+  const parsed = JSON.parse(clean);
 
-    const normalized = {
-      revenue: safeNumber(parsed.revenue),
-      operating_profit: safeNumber(parsed.operating_profit),
-      materials: safeNumber(parsed.materials),
-      personnel: safeNumber(parsed.personnel),
-      other: safeNumber(parsed.other),
-      depreciation: safeNumber(parsed.depreciation),
-      equity: safeNumber(parsed.equity),
-      cash: safeNumber(parsed.cash),
-      receivables: safeNumber(parsed.receivables),
-      payables: safeNumber(parsed.payables),
-      assets: safeNumber(parsed.assets),
-    };
+  return {
+    revenue: safeNumber(parsed.revenue),
+    operating_profit: safeNumber(parsed.operating_profit),
+    materials: safeNumber(parsed.materials),
+    personnel: safeNumber(parsed.personnel),
+    other: safeNumber(parsed.other),
+    depreciation: safeNumber(parsed.depreciation),
+    equity: safeNumber(parsed.equity),
+    cash: safeNumber(parsed.cash),
+    receivables: safeNumber(parsed.receivables),
+    payables: safeNumber(parsed.payables),
+    assets: safeNumber(parsed.assets),
+  };
+}
 
-    const analysis = buildAnalysis(normalized);
+export async function POST(req) {
+  try {
+    const formData = await req.formData();
+    const file = formData.get("file");
+    const month = String(formData.get("month") || "").trim();
+    const sourceSystem = String(formData.get("source_system") || "Netvisor").trim();
+    const documentType = String(formData.get("document_type") || "Tuloslaskelma").trim();
 
-    const accountingRow = {
+    if (!file) {
+      return NextResponse.json({ error: "Tiedosto puuttuu." }, { status: 400 });
+    }
+
+    if (!month) {
+      return NextResponse.json({ error: "Kuukausi puuttuu." }, { status: 400 });
+    }
+
+    if (typeof file.arrayBuffer !== "function") {
+      return NextResponse.json({ error: "Virheellinen tiedosto." }, { status: 400 });
+    }
+
+    const fullText = await parsePdfToText(file);
+    const text = fullText.slice(0, 18000);
+
+    if (!text.trim()) {
+      return NextResponse.json({ error: "PDF:stä ei saatu luettua tekstiä." }, { status: 400 });
+    }
+
+    const parsed = await extractAccountingWithAI(text);
+    const analysis = buildAnalysis(parsed);
+    const accountingRow = buildAccountingRow({
       month,
-      source_system: sourceSystem,
-      revenue: normalized.revenue,
-      other_income: 0,
-      materials_and_services: normalized.materials,
-      personnel_expenses: normalized.personnel,
-      other_operating_expenses: normalized.other,
-      depreciation: normalized.depreciation,
-      operating_profit: normalized.operating_profit,
-      financial_items: 0,
-      profit_before_appropriations: normalized.operating_profit,
-      balance_assets: normalized.assets,
-      balance_liabilities: normalized.assets - normalized.equity,
-      equity: normalized.equity,
-      cash_and_bank: normalized.cash,
-      receivables: normalized.receivables,
-      payables: normalized.payables,
-      notes:
-        "Tallennettu AI accounting importilla. " +
-        `Warnings: ${analysis.warnings.join(" | ") || "-"}. ` +
-        `Recommendations: ${analysis.recommendations.join(" | ") || "-"}`,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
+      sourceSystem,
+      parsed,
+      analysis,
+    });
 
     const accountingInsert = await supabase
       .from("accounting_monthly")
