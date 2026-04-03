@@ -171,10 +171,8 @@ async function parsePdfToText(file) {
 }
 
 async function extractAccountingWithAI(text) {
-  const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
-
   const response = await openai.chat.completions.create({
-    model,
+    model: "gpt-4o-mini",
     temperature: 0,
     messages: [
       {
