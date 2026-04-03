@@ -485,8 +485,6 @@ export default function Page() {
     start_at: nowLocalInput(),
     end_at: nowLocalInput(),
   });
-  const [accountingDocumentForm, setAccountingDocumentForm] = useState(emptyAccountingDocument);
-  const [accountingMonthlyForm, setAccountingMonthlyForm] = useState(emptyAccountingMonthly);
 
   const [crmSearch, setCrmSearch] = useState("");
   const [crmStatusFilter, setCrmStatusFilter] = useState("Kaikki");
@@ -615,13 +613,6 @@ export default function Page() {
       (t) => !["done", "completed", "valmis"].includes(String(t.status || "").toLowerCase())
     ).length;
 
-    const overdueTasks = tasks.filter(
-      (t) =>
-        t.due_date &&
-        new Date(t.due_date) < new Date() &&
-        !["done", "completed", "valmis"].includes(String(t.status || "").toLowerCase())
-    ).length;
-
     const quotePipeline = quotesEnriched
       .filter((q) => ["luonnos", "lähetetty"].includes(String(q.status || "").toLowerCase()))
       .reduce((s, q) => s + num(q.total), 0);
@@ -650,7 +641,6 @@ export default function Page() {
     return {
       totalClients: clients.length,
       openTasks,
-      overdueTasks,
       quotePipeline,
       quoteWon,
       quoteLost,
@@ -737,14 +727,6 @@ export default function Page() {
 
   function resetCalendar() {
     setCalendarForm({ ...emptyCalendarEvent, start_at: nowLocalInput(), end_at: nowLocalInput() });
-  }
-
-  function resetAccountingDocument() {
-    setAccountingDocumentForm(emptyAccountingDocument);
-  }
-
-  function resetAccountingMonthly() {
-    setAccountingMonthlyForm(emptyAccountingMonthly);
   }
 
   async function generateQuoteNumber() {
@@ -1085,87 +1067,6 @@ export default function Page() {
     }
   }
 
-  async function saveAccountingDocument(e) {
-    e.preventDefault();
-    setBusy((b) => ({ ...b, accountingDocument: true }));
-    try {
-      const q = accountingDocumentForm.id
-        ? await supabase.from("accounting_documents").update(accountingDocumentForm).eq("id", accountingDocumentForm.id)
-        : await supabase.from("accounting_documents").insert({
-            ...accountingDocumentForm,
-            uploaded_at: new Date().toISOString(),
-            created_at: new Date().toISOString(),
-          });
-
-      if (q.error) throw q.error;
-
-      await supabase.from("import_logs").insert({
-        import_type: accountingDocumentForm.document_type,
-        source_name: accountingDocumentForm.file_url || accountingDocumentForm.file_name || "Kirjanpidon aineisto",
-        status: "Tallennettu",
-        row_count: 1,
-        message: `Kirjanpidon aineisto tallennettu (${accountingDocumentForm.source_system})`,
-        source_system: accountingDocumentForm.source_system,
-        file_name: accountingDocumentForm.file_name || null,
-        month: accountingDocumentForm.month || null,
-        imported_at: new Date().toISOString(),
-      });
-
-      setSuccess("Kirjanpidon aineisto tallennettu.");
-      resetAccountingDocument();
-      await loadData();
-    } catch (err) {
-      setError(err.message || "Kirjanpidon aineiston tallennus epäonnistui.");
-    } finally {
-      setBusy((b) => ({ ...b, accountingDocument: false }));
-    }
-  }
-
-  async function saveAccountingMonthly(e) {
-    e.preventDefault();
-    setBusy((b) => ({ ...b, accountingMonthly: true }));
-    try {
-      const numericFields = [
-        "revenue",
-        "other_income",
-        "materials_and_services",
-        "personnel_expenses",
-        "other_operating_expenses",
-        "depreciation",
-        "operating_profit",
-        "financial_items",
-        "profit_before_appropriations",
-        "balance_assets",
-        "balance_liabilities",
-        "equity",
-        "cash_and_bank",
-        "receivables",
-        "payables",
-      ];
-
-      const payload = Object.fromEntries(
-        Object.entries(accountingMonthlyForm).map(([k, v]) => [k, numericFields.includes(k) ? num(v) : v])
-      );
-
-      const q = accountingMonthlyForm.id
-        ? await supabase.from("accounting_monthly").update(payload).eq("id", accountingMonthlyForm.id)
-        : await supabase.from("accounting_monthly").insert({
-            ...payload,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          });
-
-      if (q.error) throw q.error;
-      setSuccess("Kirjanpidon kuukausitarkennus tallennettu.");
-      resetAccountingMonthly();
-      await loadData();
-    } catch (err) {
-      setError(err.message || "Kirjanpidon kuukausitarkennuksen tallennus epäonnistui.");
-    } finally {
-      setBusy((b) => ({ ...b, accountingMonthly: false }));
-    }
-  }
-
   const nav = [
     ["dashboard", "Dashboard"],
     ["crm", "CRM"],
@@ -1274,19 +1175,8 @@ export default function Page() {
           <>
             {view === "dashboard" && (
               <section>
-                <Title
-                  eyebrow="Tilannekuva"
-                  title="Dashboard"
-                  right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>}
-                />
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(6,minmax(0,1fr))",
-                    gap: 14,
-                    marginBottom: 18,
-                  }}
-                >
+                <Title eyebrow="Tilannekuva" title="Dashboard" right={<Btn variant="ghost" onClick={loadData}>Päivitä</Btn>} />
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(6,minmax(0,1fr))", gap: 14, marginBottom: 18 }}>
                   <Metric title="Asiakkaita" value={clients.length} sub="clients" accent />
                   <Metric title="Tarjouskanta" value={eur(dashboard.quotePipeline)} sub="Luonnos + Lähetetty" />
                   <Metric title="Voitetut" value={eur(dashboard.quoteWon)} sub="Hyväksytyt tarjoukset" />
@@ -1351,41 +1241,21 @@ export default function Page() {
                     <Title eyebrow="Uusi asiakas" title="Lisää asiakas" />
                     <form onSubmit={saveClient}>
                       <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Nimi *">
-                          <Input value={clientForm.name} onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })} />
-                        </Field>
-                        <Field label="Yritys">
-                          <Input value={clientForm.company_name} onChange={(e) => setClientForm({ ...clientForm, company_name: e.target.value })} />
-                        </Field>
-                        <Field label="Sähköposti">
-                          <Input value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} />
-                        </Field>
-                        <Field label="Puhelin">
-                          <Input value={clientForm.phone} onChange={(e) => setClientForm({ ...clientForm, phone: e.target.value })} />
-                        </Field>
-                        <Field label="Kaupunki">
-                          <Input value={clientForm.city} onChange={(e) => setClientForm({ ...clientForm, city: e.target.value })} />
-                        </Field>
-                        <Field label="Y-tunnus">
-                          <Input value={clientForm.business_id} onChange={(e) => setClientForm({ ...clientForm, business_id: e.target.value })} />
-                        </Field>
+                        <Field label="Nimi *"><Input value={clientForm.name} onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })} /></Field>
+                        <Field label="Yritys"><Input value={clientForm.company_name} onChange={(e) => setClientForm({ ...clientForm, company_name: e.target.value })} /></Field>
+                        <Field label="Sähköposti"><Input value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} /></Field>
+                        <Field label="Puhelin"><Input value={clientForm.phone} onChange={(e) => setClientForm({ ...clientForm, phone: e.target.value })} /></Field>
+                        <Field label="Kaupunki"><Input value={clientForm.city} onChange={(e) => setClientForm({ ...clientForm, city: e.target.value })} /></Field>
+                        <Field label="Y-tunnus"><Input value={clientForm.business_id} onChange={(e) => setClientForm({ ...clientForm, business_id: e.target.value })} /></Field>
                         <Field label="Status">
                           <Select value={clientForm.status} onChange={(e) => setClientForm({ ...clientForm, status: e.target.value })}>
                             {CLIENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                           </Select>
                         </Field>
-                        <Field label="Finder-linkki">
-                          <Input value={clientForm.finder_url} onChange={(e) => setClientForm({ ...clientForm, finder_url: e.target.value })} />
-                        </Field>
-                        <Field label="Asiakastieto-linkki">
-                          <Input value={clientForm.asiakastieto_url} onChange={(e) => setClientForm({ ...clientForm, asiakastieto_url: e.target.value })} />
-                        </Field>
-                        <Field label="LinkedIn-linkki">
-                          <Input value={clientForm.linkedin_url} onChange={(e) => setClientForm({ ...clientForm, linkedin_url: e.target.value })} />
-                        </Field>
-                        <Field label="Muistiinpanot">
-                          <TextArea value={clientForm.notes} onChange={(e) => setClientForm({ ...clientForm, notes: e.target.value })} />
-                        </Field>
+                        <Field label="Finder-linkki"><Input value={clientForm.finder_url} onChange={(e) => setClientForm({ ...clientForm, finder_url: e.target.value })} /></Field>
+                        <Field label="Asiakastieto-linkki"><Input value={clientForm.asiakastieto_url} onChange={(e) => setClientForm({ ...clientForm, asiakastieto_url: e.target.value })} /></Field>
+                        <Field label="LinkedIn-linkki"><Input value={clientForm.linkedin_url} onChange={(e) => setClientForm({ ...clientForm, linkedin_url: e.target.value })} /></Field>
+                        <Field label="Muistiinpanot"><TextArea value={clientForm.notes} onChange={(e) => setClientForm({ ...clientForm, notes: e.target.value })} /></Field>
                         <div style={{ display: "flex", gap: 10 }}>
                           <Btn type="submit">{busy.client ? "Tallennetaan..." : "Tallenna"}</Btn>
                           <Btn type="button" variant="ghost" onClick={resetClient}>Tyhjennä</Btn>
@@ -1397,9 +1267,7 @@ export default function Page() {
                   <div style={sx.card}>
                     <Title eyebrow="Asiakaslista" title="Asiakkaat" />
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12, marginBottom: 14 }}>
-                      <Field label="Hae">
-                        <Input value={crmSearch} onChange={(e) => setCrmSearch(e.target.value)} />
-                      </Field>
+                      <Field label="Hae"><Input value={crmSearch} onChange={(e) => setCrmSearch(e.target.value)} /></Field>
                       <Field label="Status">
                         <Select value={crmStatusFilter} onChange={(e) => setCrmStatusFilter(e.target.value)}>
                           <option value="Kaikki">Kaikki</option>
@@ -1460,58 +1328,31 @@ export default function Page() {
                         <Field label="Asiakas">
                           <Select value={quoteForm.client_id} onChange={(e) => setQuoteForm({ ...quoteForm, client_id: e.target.value })}>
                             <option value="">Valitse asiakas</option>
-                            {clients.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}{c.company_name ? ` – ${c.company_name}` : ""}
-                              </option>
-                            ))}
+                            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}{c.company_name ? ` – ${c.company_name}` : ""}</option>)}
                           </Select>
                         </Field>
 
-                        <Field label="Tarjousnumero">
-                          <Input value={quoteForm.quote_number} onChange={(e) => setQuoteForm({ ...quoteForm, quote_number: e.target.value })} />
-                        </Field>
-
-                        <Field label="Otsikko">
-                          <Input value={quoteForm.title} onChange={(e) => setQuoteForm({ ...quoteForm, title: e.target.value })} />
-                        </Field>
+                        <Field label="Tarjousnumero"><Input value={quoteForm.quote_number} onChange={(e) => setQuoteForm({ ...quoteForm, quote_number: e.target.value })} /></Field>
+                        <Field label="Otsikko"><Input value={quoteForm.title} onChange={(e) => setQuoteForm({ ...quoteForm, title: e.target.value })} /></Field>
 
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Päiväys">
-                            <Input type="date" value={quoteForm.issue_date} onChange={(e) => setQuoteForm({ ...quoteForm, issue_date: e.target.value })} />
-                          </Field>
-                          <Field label="Voimassa asti">
-                            <Input
-                              type="date"
-                              value={quoteForm.valid_until}
-                              onChange={(e) => setQuoteForm({ ...quoteForm, valid_until: e.target.value, validityPreset: "oma" })}
-                            />
-                          </Field>
+                          <Field label="Päiväys"><Input type="date" value={quoteForm.issue_date} onChange={(e) => setQuoteForm({ ...quoteForm, issue_date: e.target.value })} /></Field>
+                          <Field label="Voimassa asti"><Input type="date" value={quoteForm.valid_until} onChange={(e) => setQuoteForm({ ...quoteForm, valid_until: e.target.value, validityPreset: "oma" })} /></Field>
                         </div>
 
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
                           <Field label="Voimassaolo">
                             <Select value={quoteForm.validityPreset} onChange={(e) => applyValidityPreset(e.target.value)}>
-                              {VALIDITY_PRESETS.map((v) => (
-                                <option key={v} value={v}>{v === "oma" ? "oma päivä" : `${v} pv`}</option>
-                              ))}
+                              {VALIDITY_PRESETS.map((v) => <option key={v} value={v}>{v === "oma" ? "oma päivä" : `${v} pv`}</option>)}
                             </Select>
                           </Field>
-                          <Field label="Maksuehto pv">
-                            <Input type="number" value={quoteForm.payment_terms_days} onChange={(e) => setQuoteForm({ ...quoteForm, payment_terms_days: e.target.value })} />
-                          </Field>
-                          <Field label="ALV %">
-                            <Input type="number" value={quoteForm.vat_rate} onChange={(e) => setQuoteForm({ ...quoteForm, vat_rate: e.target.value })} />
-                          </Field>
+                          <Field label="Maksuehto pv"><Input type="number" value={quoteForm.payment_terms_days} onChange={(e) => setQuoteForm({ ...quoteForm, payment_terms_days: e.target.value })} /></Field>
+                          <Field label="ALV %"><Input type="number" value={quoteForm.vat_rate} onChange={(e) => setQuoteForm({ ...quoteForm, vat_rate: e.target.value })} /></Field>
                         </div>
 
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                          <Field label="Kuvauspäivä">
-                            <Input type="date" value={quoteForm.shoot_date} onChange={(e) => setQuoteForm({ ...quoteForm, shoot_date: e.target.value })} />
-                          </Field>
-                          <Field label="Toimituspäivä">
-                            <Input type="date" value={quoteForm.delivery_date} onChange={(e) => setQuoteForm({ ...quoteForm, delivery_date: e.target.value })} />
-                          </Field>
+                          <Field label="Kuvauspäivä"><Input type="date" value={quoteForm.shoot_date} onChange={(e) => setQuoteForm({ ...quoteForm, shoot_date: e.target.value })} /></Field>
+                          <Field label="Toimituspäivä"><Input type="date" value={quoteForm.delivery_date} onChange={(e) => setQuoteForm({ ...quoteForm, delivery_date: e.target.value })} /></Field>
                         </div>
 
                         <Field label="Status">
@@ -1522,39 +1363,17 @@ export default function Page() {
 
                         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
                           <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                            <input
-                              type="checkbox"
-                              checked={!!quoteForm.auto_create_calendar}
-                              onChange={(e) => setQuoteForm({ ...quoteForm, auto_create_calendar: e.target.checked })}
-                            />
+                            <input type="checkbox" checked={!!quoteForm.auto_create_calendar} onChange={(e) => setQuoteForm({ ...quoteForm, auto_create_calendar: e.target.checked })} />
                             <span>Luo kalenteri tarjoukselta</span>
                           </label>
                           <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                            <input
-                              type="checkbox"
-                              checked={!!quoteForm.auto_create_cashflow}
-                              onChange={(e) => setQuoteForm({ ...quoteForm, auto_create_cashflow: e.target.checked })}
-                            />
+                            <input type="checkbox" checked={!!quoteForm.auto_create_cashflow} onChange={(e) => setQuoteForm({ ...quoteForm, auto_create_cashflow: e.target.checked })} />
                             <span>Luo kassavirtaennuste tarjoukselta</span>
                           </label>
                         </div>
 
-                        <div
-                          style={{
-                            padding: 14,
-                            borderRadius: 16,
-                            background: "rgba(10,10,16,.58)",
-                            border: "1px solid rgba(231,223,178,.12)",
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "center",
-                              marginBottom: 10,
-                            }}
-                          >
+                        <div style={{ padding: 14, borderRadius: 16, background: "rgba(10,10,16,.58)", border: "1px solid rgba(231,223,178,.12)" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                             <strong>Tarjousrivit</strong>
                             <Btn type="button" variant="ghost" onClick={addDraftLine}>Lisää rivi</Btn>
                           </div>
@@ -1577,25 +1396,11 @@ export default function Page() {
 
                           <div style={{ display: "grid", gap: 10 }}>
                             {quoteDraftLines.map((l) => (
-                              <div
-                                key={l.id}
-                                style={{
-                                  padding: 12,
-                                  borderRadius: 14,
-                                  background: "rgba(8,8,13,.68)",
-                                  border: "1px solid rgba(231,223,178,.08)",
-                                }}
-                              >
-                                <Field label="Kuvaus">
-                                  <Input value={l.description} onChange={(e) => updateDraftLine(l.id, "description", e.target.value)} />
-                                </Field>
+                              <div key={l.id} style={{ padding: 12, borderRadius: 14, background: "rgba(8,8,13,.68)", border: "1px solid rgba(231,223,178,.08)" }}>
+                                <Field label="Kuvaus"><Input value={l.description} onChange={(e) => updateDraftLine(l.id, "description", e.target.value)} /></Field>
                                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 10, marginTop: 10 }}>
-                                  <Field label="Määrä">
-                                    <Input type="number" value={l.quantity} onChange={(e) => updateDraftLine(l.id, "quantity", e.target.value)} />
-                                  </Field>
-                                  <Field label="Yksikköhinta ALV 0">
-                                    <Input type="number" value={l.unit_price} onChange={(e) => updateDraftLine(l.id, "unit_price", e.target.value)} />
-                                  </Field>
+                                  <Field label="Määrä"><Input type="number" value={l.quantity} onChange={(e) => updateDraftLine(l.id, "quantity", e.target.value)} /></Field>
+                                  <Field label="Yksikköhinta ALV 0"><Input type="number" value={l.unit_price} onChange={(e) => updateDraftLine(l.id, "unit_price", e.target.value)} /></Field>
                                   <div style={{ display: "flex", alignItems: "end" }}>
                                     <Btn type="button" variant="danger" onClick={() => removeDraftLine(l.id)}>Poista</Btn>
                                   </div>
@@ -1611,12 +1416,8 @@ export default function Page() {
                           </div>
                         </div>
 
-                        <Field label="Sisäinen huomio">
-                          <TextArea value={quoteForm.internal_note} onChange={(e) => setQuoteForm({ ...quoteForm, internal_note: e.target.value })} />
-                        </Field>
-                        <Field label="Muistiinpanot">
-                          <TextArea value={quoteForm.notes} onChange={(e) => setQuoteForm({ ...quoteForm, notes: e.target.value })} />
-                        </Field>
+                        <Field label="Sisäinen huomio"><TextArea value={quoteForm.internal_note} onChange={(e) => setQuoteForm({ ...quoteForm, internal_note: e.target.value })} /></Field>
+                        <Field label="Muistiinpanot"><TextArea value={quoteForm.notes} onChange={(e) => setQuoteForm({ ...quoteForm, notes: e.target.value })} /></Field>
 
                         <div style={{ display: "flex", gap: 10 }}>
                           <Btn type="submit">{busy.quote ? "Tallennetaan..." : "Tallenna tarjous"}</Btn>
@@ -1629,9 +1430,7 @@ export default function Page() {
                   <div style={sx.card}>
                     <Title eyebrow="Tarjouslista" title="Tallennetut tarjoukset" />
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12, marginBottom: 14 }}>
-                      <Field label="Hae">
-                        <Input value={quoteSearch} onChange={(e) => setQuoteSearch(e.target.value)} />
-                      </Field>
+                      <Field label="Hae"><Input value={quoteSearch} onChange={(e) => setQuoteSearch(e.target.value)} /></Field>
                       <Field label="Status">
                         <Select value={quoteStatusFilter} onChange={(e) => setQuoteStatusFilter(e.target.value)}>
                           <option value="Kaikki">Kaikki</option>
@@ -1687,36 +1486,17 @@ export default function Page() {
                     <form onSubmit={(e) => e.preventDefault()} style={{ marginBottom: 22 }}>
                       <Title eyebrow="V6.6 AI import" title="PDF → AI → kirjanpito" />
                       <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Kuukausi">
-                          <Input
-                            value={aiImportMonth}
-                            onChange={(e) => setAiImportMonth(e.target.value)}
-                            placeholder="2026-04"
-                          />
-                        </Field>
-
+                        <Field label="Kuukausi"><Input value={aiImportMonth} onChange={(e) => setAiImportMonth(e.target.value)} placeholder="2026-04" /></Field>
                         <Field label="Lähdejärjestelmä">
-                          <Select
-                            value={aiImportSourceSystem}
-                            onChange={(e) => setAiImportSourceSystem(e.target.value)}
-                          >
-                            {SOURCE_SYSTEMS.map((s) => (
-                              <option key={s} value={s}>{s}</option>
-                            ))}
+                          <Select value={aiImportSourceSystem} onChange={(e) => setAiImportSourceSystem(e.target.value)}>
+                            {SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}
                           </Select>
                         </Field>
-
                         <Field label="Dokumenttityyppi">
-                          <Select
-                            value={aiImportDocumentType}
-                            onChange={(e) => setAiImportDocumentType(e.target.value)}
-                          >
-                            {ACCOUNTING_DOC_TYPES.map((s) => (
-                              <option key={s} value={s}>{s}</option>
-                            ))}
+                          <Select value={aiImportDocumentType} onChange={(e) => setAiImportDocumentType(e.target.value)}>
+                            {ACCOUNTING_DOC_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
                           </Select>
                         </Field>
-
                         <Field label="PDF-tiedosto">
                           <input
                             type="file"
@@ -1725,22 +1505,17 @@ export default function Page() {
                             style={{ ...sx.input, padding: "10px 12px" }}
                           />
                         </Field>
-
                         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                           <Btn type="button" onClick={uploadAccountingPdfToAi}>
                             {busy.aiImport ? "Tuodaan..." : "AI tuo PDF"}
                           </Btn>
-                          <Btn
-                            type="button"
-                            variant="ghost"
-                            onClick={() => {
-                              setAiImportFile(null);
-                              setAiAnalysisResult(null);
-                              setAiImportMonth(today().slice(0, 7));
-                              setAiImportSourceSystem("Netvisor");
-                              setAiImportDocumentType("Tuloslaskelma");
-                            }}
-                          >
+                          <Btn type="button" variant="ghost" onClick={() => {
+                            setAiImportFile(null);
+                            setAiAnalysisResult(null);
+                            setAiImportMonth(today().slice(0, 7));
+                            setAiImportSourceSystem("Netvisor");
+                            setAiImportDocumentType("Tuloslaskelma");
+                          }}>
                             Tyhjennä
                           </Btn>
                         </div>
@@ -1750,21 +1525,11 @@ export default function Page() {
                     <form onSubmit={saveFinance} style={{ marginBottom: 22 }}>
                       <Title eyebrow="finance_monthly" title="CRM-kuukausi" />
                       <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Kuukausi">
-                          <Input value={financeForm.month} onChange={(e) => setFinanceForm({ ...financeForm, month: e.target.value })} placeholder="2026-04" />
-                        </Field>
-                        <Field label="Liikevaihto">
-                          <Input type="number" value={financeForm.revenue} onChange={(e) => setFinanceForm({ ...financeForm, revenue: e.target.value })} />
-                        </Field>
-                        <Field label="Kulut">
-                          <Input type="number" value={financeForm.expenses} onChange={(e) => setFinanceForm({ ...financeForm, expenses: e.target.value })} />
-                        </Field>
-                        <Field label="Tulos">
-                          <Input type="number" value={financeForm.profit} onChange={(e) => setFinanceForm({ ...financeForm, profit: e.target.value })} />
-                        </Field>
-                        <Field label="Tavoite">
-                          <Input type="number" value={financeForm.target} onChange={(e) => setFinanceForm({ ...financeForm, target: e.target.value })} />
-                        </Field>
+                        <Field label="Kuukausi"><Input value={financeForm.month} onChange={(e) => setFinanceForm({ ...financeForm, month: e.target.value })} placeholder="2026-04" /></Field>
+                        <Field label="Liikevaihto"><Input type="number" value={financeForm.revenue} onChange={(e) => setFinanceForm({ ...financeForm, revenue: e.target.value })} /></Field>
+                        <Field label="Kulut"><Input type="number" value={financeForm.expenses} onChange={(e) => setFinanceForm({ ...financeForm, expenses: e.target.value })} /></Field>
+                        <Field label="Tulos"><Input type="number" value={financeForm.profit} onChange={(e) => setFinanceForm({ ...financeForm, profit: e.target.value })} /></Field>
+                        <Field label="Tavoite"><Input type="number" value={financeForm.target} onChange={(e) => setFinanceForm({ ...financeForm, target: e.target.value })} /></Field>
                         <div style={{ display: "flex", gap: 10 }}>
                           <Btn type="submit">{busy.finance ? "Tallennetaan..." : "Tallenna kuukausi"}</Btn>
                           <Btn type="button" variant="ghost" onClick={resetFinance}>Tyhjennä</Btn>
@@ -1775,20 +1540,14 @@ export default function Page() {
                     <form onSubmit={saveCashflow}>
                       <Title eyebrow="cashflow_events" title="Kassavirta" />
                       <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Päivä">
-                          <Input type="date" value={cashflowForm.event_date} onChange={(e) => setCashflowForm({ ...cashflowForm, event_date: e.target.value })} />
-                        </Field>
-                        <Field label="Summa">
-                          <Input type="number" value={cashflowForm.amount} onChange={(e) => setCashflowForm({ ...cashflowForm, amount: e.target.value })} />
-                        </Field>
+                        <Field label="Päivä"><Input type="date" value={cashflowForm.event_date} onChange={(e) => setCashflowForm({ ...cashflowForm, event_date: e.target.value })} /></Field>
+                        <Field label="Summa"><Input type="number" value={cashflowForm.amount} onChange={(e) => setCashflowForm({ ...cashflowForm, amount: e.target.value })} /></Field>
                         <Field label="Tyyppi">
                           <Select value={cashflowForm.type} onChange={(e) => setCashflowForm({ ...cashflowForm, type: e.target.value })}>
                             {CASHFLOW_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
                           </Select>
                         </Field>
-                        <Field label="Kuvaus">
-                          <Input value={cashflowForm.description} onChange={(e) => setCashflowForm({ ...cashflowForm, description: e.target.value })} />
-                        </Field>
+                        <Field label="Kuvaus"><Input value={cashflowForm.description} onChange={(e) => setCashflowForm({ ...cashflowForm, description: e.target.value })} /></Field>
                         <div style={{ display: "flex", gap: 10 }}>
                           <Btn type="submit">{busy.cashflow ? "Tallennetaan..." : "Tallenna kassavirta"}</Btn>
                           <Btn type="button" variant="ghost" onClick={resetCashflow}>Tyhjennä</Btn>
@@ -1816,13 +1575,7 @@ export default function Page() {
                     </div>
 
                     {aiAnalysisResult?.analysis && (
-                      <div
-                        style={{
-                          ...sx.cardDark,
-                          marginBottom: 18,
-                          background: "linear-gradient(180deg, rgba(32,23,44,.98), rgba(14,12,22,.98))",
-                        }}
-                      >
+                      <div style={{ ...sx.cardDark, marginBottom: 18, background: "linear-gradient(180deg, rgba(32,23,44,.98), rgba(14,12,22,.98))" }}>
                         <Title eyebrow="AI analyysi" title={`Kuukausi ${aiAnalysisResult.data?.month || "-"}`} />
 
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,minmax(0,1fr))", gap: 12, marginBottom: 12 }}>
@@ -1881,9 +1634,7 @@ export default function Page() {
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
                       <div>
                         <h3 style={{ marginTop: 0 }}>Kirjanpidon aineistot</h3>
-                        <Field label="Suodata kuukautta">
-                          <Input value={accountingFilter} onChange={(e) => setAccountingFilter(e.target.value)} placeholder="2026-04" />
-                        </Field>
+                        <Field label="Suodata kuukautta"><Input value={accountingFilter} onChange={(e) => setAccountingFilter(e.target.value)} placeholder="2026-04" /></Field>
                         <table style={sx.table}>
                           <thead>
                             <tr>
@@ -1951,9 +1702,7 @@ export default function Page() {
                   <div style={sx.cardDark}>
                     <form onSubmit={saveCalendarEvent}>
                       <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Otsikko">
-                          <Input value={calendarForm.title} onChange={(e) => setCalendarForm({ ...calendarForm, title: e.target.value })} />
-                        </Field>
+                        <Field label="Otsikko"><Input value={calendarForm.title} onChange={(e) => setCalendarForm({ ...calendarForm, title: e.target.value })} /></Field>
                         <Field label="Asiakas">
                           <Select value={calendarForm.client_id} onChange={(e) => setCalendarForm({ ...calendarForm, client_id: e.target.value })}>
                             <option value="">Ei asiakasta</option>
@@ -1976,15 +1725,9 @@ export default function Page() {
                             {CALENDAR_EVENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
                           </Select>
                         </Field>
-                        <Field label="Alkaa">
-                          <Input type="datetime-local" value={calendarForm.start_at} onChange={(e) => setCalendarForm({ ...calendarForm, start_at: e.target.value })} />
-                        </Field>
-                        <Field label="Päättyy">
-                          <Input type="datetime-local" value={calendarForm.end_at} onChange={(e) => setCalendarForm({ ...calendarForm, end_at: e.target.value })} />
-                        </Field>
-                        <Field label="Sijainti">
-                          <Input value={calendarForm.location} onChange={(e) => setCalendarForm({ ...calendarForm, location: e.target.value })} />
-                        </Field>
+                        <Field label="Alkaa"><Input type="datetime-local" value={calendarForm.start_at} onChange={(e) => setCalendarForm({ ...calendarForm, start_at: e.target.value })} /></Field>
+                        <Field label="Päättyy"><Input type="datetime-local" value={calendarForm.end_at} onChange={(e) => setCalendarForm({ ...calendarForm, end_at: e.target.value })} /></Field>
+                        <Field label="Sijainti"><Input value={calendarForm.location} onChange={(e) => setCalendarForm({ ...calendarForm, location: e.target.value })} /></Field>
                         <div style={{ display: "flex", gap: 10 }}>
                           <Btn type="submit">{busy.calendar ? "Tallennetaan..." : "Tallenna tapahtuma"}</Btn>
                           <Btn type="button" variant="ghost" onClick={resetCalendar}>Tyhjennä</Btn>
@@ -1995,9 +1738,7 @@ export default function Page() {
 
                   <div style={sx.card}>
                     <Title eyebrow="Lista" title="Kalenteritapahtumat" />
-                    <Field label="Hae tapahtumia">
-                      <Input value={calendarFilter} onChange={(e) => setCalendarFilter(e.target.value)} />
-                    </Field>
+                    <Field label="Hae tapahtumia"><Input value={calendarFilter} onChange={(e) => setCalendarFilter(e.target.value)} /></Field>
                     <table style={sx.table}>
                       <thead>
                         <tr>
@@ -2011,9 +1752,7 @@ export default function Page() {
                           .filter((e) =>
                             !calendarFilter
                               ? true
-                              : [e.title, e.event_type, e.status, e.location]
-                                  .filter(Boolean)
-                                  .some((v) => String(v).toLowerCase().includes(calendarFilter.toLowerCase()))
+                              : [e.title, e.event_type, e.status, e.location].filter(Boolean).some((v) => String(v).toLowerCase().includes(calendarFilter.toLowerCase()))
                           )
                           .map((e) => (
                             <tr key={e.id}>
@@ -2038,24 +1777,12 @@ export default function Page() {
                   <div style={sx.cardDark}>
                     <form onSubmit={saveTemplate}>
                       <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Nimi">
-                          <Input value={templateForm.name} onChange={(e) => setTemplateForm({ ...templateForm, name: e.target.value, service_name: e.target.value })} />
-                        </Field>
-                        <Field label="Kategoria">
-                          <Input value={templateForm.category} onChange={(e) => setTemplateForm({ ...templateForm, category: e.target.value })} />
-                        </Field>
-                        <Field label="Yksikkö">
-                          <Input value={templateForm.unit} onChange={(e) => setTemplateForm({ ...templateForm, unit: e.target.value })} />
-                        </Field>
-                        <Field label="Yksikköhinta ALV 0">
-                          <Input type="number" value={templateForm.unit_price} onChange={(e) => setTemplateForm({ ...templateForm, unit_price: e.target.value })} />
-                        </Field>
-                        <Field label="ALV %">
-                          <Input type="number" value={templateForm.vat_rate} onChange={(e) => setTemplateForm({ ...templateForm, vat_rate: e.target.value })} />
-                        </Field>
-                        <Field label="Kuvaus">
-                          <TextArea value={templateForm.description} onChange={(e) => setTemplateForm({ ...templateForm, description: e.target.value })} />
-                        </Field>
+                        <Field label="Nimi"><Input value={templateForm.name} onChange={(e) => setTemplateForm({ ...templateForm, name: e.target.value, service_name: e.target.value })} /></Field>
+                        <Field label="Kategoria"><Input value={templateForm.category} onChange={(e) => setTemplateForm({ ...templateForm, category: e.target.value })} /></Field>
+                        <Field label="Yksikkö"><Input value={templateForm.unit} onChange={(e) => setTemplateForm({ ...templateForm, unit: e.target.value })} /></Field>
+                        <Field label="Yksikköhinta ALV 0"><Input type="number" value={templateForm.unit_price} onChange={(e) => setTemplateForm({ ...templateForm, unit_price: e.target.value })} /></Field>
+                        <Field label="ALV %"><Input type="number" value={templateForm.vat_rate} onChange={(e) => setTemplateForm({ ...templateForm, vat_rate: e.target.value })} /></Field>
+                        <Field label="Kuvaus"><TextArea value={templateForm.description} onChange={(e) => setTemplateForm({ ...templateForm, description: e.target.value })} /></Field>
                         <div style={{ display: "flex", gap: 10 }}>
                           <Btn type="submit">{busy.template ? "Tallennetaan..." : "Tallenna pohja"}</Btn>
                           <Btn type="button" variant="ghost" onClick={resetTemplate}>Tyhjennä</Btn>
