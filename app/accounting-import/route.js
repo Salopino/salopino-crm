@@ -1,63 +1,190 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import pdfParse from "pdf-parse";
+import { createClient } from "@supabase/supabase-js";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+function safeNumber(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const cleaned = v
+      .replace(/\s/g, "")
+      .replace(/\./g, "")
+      .replace(",", ".");
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function round2(v) {
+  return Math.round(Number(v || 0) * 100) / 100;
+}
+
+function safeDiv(a, b) {
+  if (!b || Number(b) === 0) return 0;
+  return Number(a || 0) / Number(b || 0);
+}
+
+function cleanJsonText(raw) {
+  return String(raw || "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+}
+
+function buildAnalysis(data) {
+  const revenue = safeNumber(data.revenue);
+  const operatingProfit = safeNumber(data.operating_profit);
+  const materials = Math.abs(safeNumber(data.materials));
+  const personnel = Math.abs(safeNumber(data.personnel));
+  const other = Math.abs(safeNumber(data.other));
+  const depreciation = Math.abs(safeNumber(data.depreciation));
+  const equity = safeNumber(data.equity);
+  const cash = safeNumber(data.cash);
+  const receivables = safeNumber(data.receivables);
+  const payables = Math.abs(safeNumber(data.payables));
+  const assets = safeNumber(data.assets);
+
+  const monthlyBurn = materials + personnel + other;
+  const operatingMarginPct = revenue > 0 ? round2((operatingProfit / revenue) * 100) : 0;
+  const equityRatioPct = assets > 0 ? round2((equity / assets) * 100) : 0;
+  const currentRatio = round2(safeDiv(cash + receivables, payables));
+  const cashRunwayMonths = round2(safeDiv(cash, monthlyBurn));
+  const debtRatioPct = assets > 0 ? round2((Math.abs(assets - equity) / assets) * 100) : 0;
+
+  const warnings = [];
+  const strengths = [];
+  const recommendations = [];
+
+  if (operatingProfit < 0) {
+    warnings.push("Liiketulos on negatiivinen.");
+    recommendations.push("Käy kulurakenne läpi ja priorisoi myyntiä sekä kannattavimmat palvelut.");
+  } else {
+    strengths.push("Liiketulos on positiivinen.");
+  }
+
+  if (cashRunwayMonths < 2) {
+    warnings.push("Kassapuskuri on alle 2 kuukautta.");
+    recommendations.push("Tiukenna laskutuksen rytmiä ja seuraa kassavirtaennustetta viikkotasolla.");
+  } else if (cashRunwayMonths >= 4) {
+    strengths.push("Kassapuskuri on kohtuullinen.");
+  }
+
+  if (equityRatioPct < 20) {
+    warnings.push("Omavaraisuusaste on matala.");
+    recommendations.push("Vahvista omaa pääomaa, hillitse kulukuormaa ja vältä heikosti kannattavia toimeksiantoja.");
+  } else if (equityRatioPct >= 35) {
+    strengths.push("Omavaraisuusaste on hyvällä tasolla.");
+  }
+
+  if (currentRatio < 1) {
+    warnings.push("Current ratio on alle 1.");
+    recommendations.push("Lyhyen aikavälin maksuvalmius vaatii tarkkaa kassanhallintaa.");
+  } else if (currentRatio >= 1.5) {
+    strengths.push("Lyhyen aikavälin maksuvalmius näyttää vakaalta.");
+  }
+
+  if (operatingMarginPct < 5 && revenue > 0) {
+    warnings.push("Liikevoittomarginaali on matala.");
+    recommendations.push("Tarkista hinnoittelu, projektivalinta ja lisämyynnin osuus.");
+  } else if (operatingMarginPct >= 10) {
+    strengths.push("Liikevoittomarginaali on terveellä tasolla.");
+  }
+
+  if (recommendations.length === 0) {
+    recommendations.push("Jatka kuukausitason seurantaa ja vertaa toteumaa myyntitavoitteeseen sekä kassavirtaennusteeseen.");
+  }
+
+  return {
+    monthly_burn: round2(monthlyBurn),
+    operating_margin_pct: operatingMarginPct,
+    equity_ratio_pct: equityRatioPct,
+    current_ratio: currentRatio,
+    cash_runway_months: cashRunwayMonths,
+    debt_ratio_pct: debtRatioPct,
+    warnings,
+    strengths,
+    recommendations,
+  };
+}
+
 export async function POST(req) {
   try {
     const formData = await req.formData();
     const file = formData.get("file");
-    const month = formData.get("month");
+    const month = String(formData.get("month") || "").trim();
+    const sourceSystem = String(formData.get("source_system") || "Netvisor").trim();
+    const documentType = String(formData.get("document_type") || "Tuloslaskelma").trim();
 
     if (!file) {
-      return NextResponse.json({ error: "Tiedosto puuttuu" }, { status: 400 });
+      return NextResponse.json({ error: "Tiedosto puuttuu." }, { status: 400 });
+    }
+
+    if (!month) {
+      return NextResponse.json({ error: "Kuukausi puuttuu." }, { status: 400 });
     }
 
     const buffer = Buffer.from(await file.arrayBuffer());
-
-    // 1. Puretaan PDF tekstiksi
     const pdfData = await pdfParse(buffer);
-    const text = pdfData.text;
+    const text = String(pdfData.text || "").slice(0, 18000);
 
-    // 2. AI-tulkinta
+    if (!text.trim()) {
+      return NextResponse.json({ error: "PDF:stä ei saatu luettua tekstiä." }, { status: 400 });
+    }
+
     const response = await openai.chat.completions.create({
       model: "gpt-5.3",
+      temperature: 0,
       messages: [
         {
           role: "system",
           content: `
-Olet kirjanpidon analysoija. Poimi suomalaisesta tuloslaskelmasta ja taseesta seuraavat:
+Olet suomalaisen pk-yrityksen kirjanpidon analysoija.
 
-- liikevaihto
-- liiketulos
-- materiaalit ja palvelut
-- henkilöstökulut
-- muut kulut
-- poistot
-- oma pääoma
-- rahat ja pankkisaamiset
-- myyntisaamiset
-- ostovelat
-- taseen loppusumma
+Poimi tekstistä seuraavat kentät:
+- revenue = liikevaihto
+- operating_profit = liiketulos tai liikevoitto
+- materials = materiaalit ja palvelut
+- personnel = henkilöstökulut / palkkakulut
+- other = muut liiketoiminnan kulut
+- depreciation = poistot
+- equity = oma pääoma
+- cash = rahat ja pankkisaamiset
+- receivables = myyntisaamiset tai saamiset
+- payables = ostovelat tai lyhytaikaiset velat
+- assets = taseen loppusumma / vastaavaa yhteensä / varat yhteensä
 
-Palauta vain JSON muodossa:
+Tunnista luvut vaikka ne olisivat muodossa:
+- 1 234 567,89
+- -1234
+- (1234)
+
+Jos arvoa ei löydy, käytä 0.
+
+Palauta VAIN validi JSON tässä muodossa:
 {
-  revenue: number,
-  operating_profit: number,
-  materials: number,
-  personnel: number,
-  other: number,
-  depreciation: number,
-  equity: number,
-  cash: number,
-  receivables: number,
-  payables: number,
-  assets: number
+  "revenue": 0,
+  "operating_profit": 0,
+  "materials": 0,
+  "personnel": 0,
+  "other": 0,
+  "depreciation": 0,
+  "equity": 0,
+  "cash": 0,
+  "receivables": 0,
+  "payables": 0,
+  "assets": 0
 }
-          `,
+          `.trim(),
         },
         {
           role: "user",
@@ -66,28 +193,103 @@ Palauta vain JSON muodossa:
       ],
     });
 
-    const parsed = JSON.parse(response.choices[0].message.content);
+    const raw = response.choices?.[0]?.message?.content || "";
+    const clean = cleanJsonText(raw);
+    const parsed = JSON.parse(clean);
+
+    const normalized = {
+      revenue: safeNumber(parsed.revenue),
+      operating_profit: safeNumber(parsed.operating_profit),
+      materials: safeNumber(parsed.materials),
+      personnel: safeNumber(parsed.personnel),
+      other: safeNumber(parsed.other),
+      depreciation: safeNumber(parsed.depreciation),
+      equity: safeNumber(parsed.equity),
+      cash: safeNumber(parsed.cash),
+      receivables: safeNumber(parsed.receivables),
+      payables: safeNumber(parsed.payables),
+      assets: safeNumber(parsed.assets),
+    };
+
+    const analysis = buildAnalysis(normalized);
+
+    const accountingRow = {
+      month,
+      source_system: sourceSystem,
+      revenue: normalized.revenue,
+      other_income: 0,
+      materials_and_services: normalized.materials,
+      personnel_expenses: normalized.personnel,
+      other_operating_expenses: normalized.other,
+      depreciation: normalized.depreciation,
+      operating_profit: normalized.operating_profit,
+      financial_items: 0,
+      profit_before_appropriations: normalized.operating_profit,
+      balance_assets: normalized.assets,
+      balance_liabilities: normalized.assets - normalized.equity,
+      equity: normalized.equity,
+      cash_and_bank: normalized.cash,
+      receivables: normalized.receivables,
+      payables: normalized.payables,
+      notes:
+        "Tallennettu AI accounting importilla. " +
+        `Warnings: ${analysis.warnings.join(" | ") || "-"}. ` +
+        `Recommendations: ${analysis.recommendations.join(" | ") || "-"}`,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const accountingInsert = await supabase
+      .from("accounting_monthly")
+      .insert(accountingRow)
+      .select()
+      .single();
+
+    if (accountingInsert.error) {
+      throw accountingInsert.error;
+    }
+
+    const documentInsert = await supabase.from("accounting_documents").insert({
+      month,
+      document_type: documentType,
+      source_system: sourceSystem,
+      file_name: file.name || `AI-import-${month}.pdf`,
+      file_url: "",
+      storage_path: "",
+      notes: "PDF käsitelty AI accounting import -reitillä.",
+      uploaded_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+
+    if (documentInsert.error) {
+      throw documentInsert.error;
+    }
+
+    const logInsert = await supabase.from("import_logs").insert({
+      import_type: "AI Accounting",
+      source_name: file.name || "PDF",
+      status: "OK",
+      row_count: 1,
+      message: `AI parsing onnistui kuukaudelle ${month}`,
+      source_system: sourceSystem,
+      file_name: file.name || null,
+      month,
+      imported_at: new Date().toISOString(),
+    });
+
+    if (logInsert.error) {
+      throw logInsert.error;
+    }
 
     return NextResponse.json({
       success: true,
-      data: {
-        month,
-        revenue: parsed.revenue,
-        operating_profit: parsed.operating_profit,
-        materials_and_services: parsed.materials,
-        personnel_expenses: parsed.personnel,
-        other_operating_expenses: parsed.other,
-        depreciation: parsed.depreciation,
-        equity: parsed.equity,
-        cash_and_bank: parsed.cash,
-        receivables: parsed.receivables,
-        payables: parsed.payables,
-        balance_assets: parsed.assets,
-      },
+      data: accountingInsert.data,
+      analysis,
+      extracted_text_preview: text.slice(0, 1200),
     });
   } catch (err) {
     return NextResponse.json(
-      { error: err.message || "Import epäonnistui" },
+      { error: err.message || "Import epäonnistui." },
       { status: 500 }
     );
   }
