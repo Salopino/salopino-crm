@@ -10,9 +10,8 @@ const supabase = createClient(
 
 const CLIENT_STATUSES = ["Liidi", "Kontaktoitu", "Tarjous", "Neuvottelu", "Voitettu", "Hävitty"];
 const QUOTE_STATUSES = ["Luonnos", "Lähetetty", "Hyväksytty", "Hylätty", "Vanhentunut"];
-const INVOICE_STATUSES = ["Ei laskutettu", "Laskutettu", "Maksettu"];
 const CASHFLOW_TYPES = ["Tulo", "Meno", "Ennuste"];
-const CASHFLOW_DIRECTIONS = ["in", "out"];
+const INVOICE_STATUSES = ["Ei laskutettu", "Laskutettu", "Maksettu"];
 const VALIDITY_PRESETS = ["7", "10", "14", "21", "30", "oma"];
 const CALENDAR_EVENT_TYPES = ["Kuvaus", "Palaveri", "Toimitus", "Seurantakäynti", "Muu"];
 const CALENDAR_EVENT_STATUSES = ["Suunniteltu", "Vahvistettu", "Valmis", "Peruttu"];
@@ -26,7 +25,8 @@ const ACCOUNTING_DOC_TYPES = [
   "Muu",
 ];
 const SOURCE_SYSTEMS = ["Netvisor", "CRM", "Muu"];
-const VAT_DEFAULT = 25.5;
+
+const VAT_DEFAULT = 0;
 const MONTHLY_TARGET_DEFAULT = 5000;
 
 const emptyClient = {
@@ -44,6 +44,25 @@ const emptyClient = {
   linkedin_url: "",
 };
 
+const emptyContact = {
+  id: null,
+  client_id: "",
+  name: "",
+  email: "",
+  phone: "",
+  role: "",
+  notes: "",
+};
+
+const emptyTask = {
+  id: null,
+  client_id: "",
+  title: "",
+  status: "Avoin",
+  due_date: "",
+  notes: "",
+};
+
 const emptyQuote = {
   id: null,
   client_id: "",
@@ -55,6 +74,8 @@ const emptyQuote = {
   quote_valid_days: 14,
   validityPreset: "14",
   vat_rate: VAT_DEFAULT,
+  is_b2b: true,
+  vat_included: false,
   payment_terms_days: 14,
   invoice_status: "Ei laskutettu",
   invoice_number: "",
@@ -64,6 +85,7 @@ const emptyQuote = {
   delivery_date: "",
   auto_create_calendar: false,
   auto_create_cashflow: true,
+  calendar_event_id: "",
   internal_note: "",
   notes: "",
 };
@@ -83,7 +105,6 @@ const emptyCashflow = {
   event_date: "",
   amount: "",
   type: "Tulo",
-  direction: "in",
   description: "",
   notes: "",
   quote_id: "",
@@ -162,17 +183,10 @@ const eur = (v) =>
   }).format(Number(v || 0));
 
 const num = (v) => Number(v || 0);
-const today = () => new Date().toISOString().slice(0, 10);
+
 const fmtDate = (v) => (v ? new Date(v).toLocaleDateString("fi-FI") : "-");
 const fmtDateTime = (v) => (v ? new Date(v).toLocaleString("fi-FI") : "-");
-
-const addDays = (dateLike, days) => {
-  if (!dateLike) return "";
-  const d = new Date(dateLike);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setDate(d.getDate() + Number(days || 0));
-  return d.toISOString().slice(0, 10);
-};
+const today = () => new Date().toISOString().slice(0, 10);
 
 const nowLocalInput = () => {
   const d = new Date();
@@ -182,22 +196,39 @@ const nowLocalInput = () => {
   )}:${pad(d.getMinutes())}`;
 };
 
+const addDays = (dateLike, days) => {
+  if (!dateLike) return "";
+  const d = new Date(dateLike);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + Number(days || 0));
+  return d.toISOString().slice(0, 10);
+};
+
+const ymKey = (dateLike) => {
+  if (!dateLike) return "";
+  const d = new Date(dateLike);
+  if (Number.isNaN(d.getTime())) return String(dateLike).slice(0, 7);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
 const pct = (value) => `${Math.round(value)}%`;
 
 const normClientStatus = (s) =>
   CLIENT_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Liidi";
+
 const normQuoteStatus = (s) =>
   QUOTE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Luonnos";
+
 const normInvoiceStatus = (s) =>
   INVOICE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) ||
   "Ei laskutettu";
 
 const traffic = (value, target) => {
-  if (!target || target <= 0) return { label: "Ei tavoitetta" };
+  if (!target || target <= 0) return { label: "Ei tavoitetta", color: "#c8c8c8" };
   const ratio = value / target;
-  if (ratio >= 1) return { label: "Vihreä" };
-  if (ratio >= 0.7) return { label: "Keltainen" };
-  return { label: "Punainen" };
+  if (ratio >= 1) return { label: "Vihreä", color: "#ccffe0" };
+  if (ratio >= 0.7) return { label: "Keltainen", color: "#fff1c7" };
+  return { label: "Punainen", color: "#ffd7df" };
 };
 
 const sx = {
@@ -404,6 +435,7 @@ function StatPill({ label, good, warn, danger }) {
         background: "rgba(71,137,94,.18)",
         border: "1px solid rgba(125,212,156,.18)",
       };
+
   return <span style={{ ...sx.pill, ...style }}>{label}</span>;
 }
 
@@ -425,451 +457,29 @@ function LinkChip({ href, label }) {
     </a>
   );
 }
-	  "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
-
-const CLIENT_STATUSES = ["Liidi", "Kontaktoitu", "Tarjous", "Neuvottelu", "Voitettu", "Hävitty"];
-const QUOTE_STATUSES = ["Luonnos", "Lähetetty", "Hyväksytty", "Hylätty", "Vanhentunut"];
-const INVOICE_STATUSES = ["Ei laskutettu", "Laskutettu", "Maksettu"];
-const CASHFLOW_TYPES = ["Tulo", "Meno", "Ennuste"];
-const CASHFLOW_DIRECTIONS = ["in", "out"];
-const VALIDITY_PRESETS = ["7", "10", "14", "21", "30", "oma"];
-const CALENDAR_EVENT_TYPES = ["Kuvaus", "Palaveri", "Toimitus", "Seurantakäynti", "Muu"];
-const CALENDAR_EVENT_STATUSES = ["Suunniteltu", "Vahvistettu", "Valmis", "Peruttu"];
-const ACCOUNTING_DOC_TYPES = [
-  "Tuloslaskelma",
-  "Tase",
-  "Pääkirja",
-  "Päiväkirja",
-  "Myyntiraportti",
-  "Ostoraportti",
-  "Muu",
-];
-const SOURCE_SYSTEMS = ["Netvisor", "CRM", "Muu"];
-const VAT_DEFAULT = 25.5;
-const MONTHLY_TARGET_DEFAULT = 5000;
-
-const emptyClient = {
-  id: null,
-  name: "",
-  company_name: "",
-  email: "",
-  phone: "",
-  city: "",
-  business_id: "",
-  status: "Liidi",
-  notes: "",
-  finder_url: "",
-  asiakastieto_url: "",
-  linkedin_url: "",
-};
-
-const emptyQuote = {
-  id: null,
-  client_id: "",
-  quote_number: "",
-  title: "",
-  status: "Luonnos",
-  issue_date: "",
-  valid_until: "",
-  quote_valid_days: 14,
-  validityPreset: "14",
-  vat_rate: VAT_DEFAULT,
-  payment_terms_days: 14,
-  invoice_status: "Ei laskutettu",
-  invoice_number: "",
-  invoice_date: "",
-  expected_payment_date: "",
-  shoot_date: "",
-  delivery_date: "",
-  auto_create_calendar: false,
-  auto_create_cashflow: true,
-  internal_note: "",
-  notes: "",
-};
-
-const emptyFinance = {
-  id: null,
-  month: "",
-  revenue: "",
-  expenses: "",
-  profit: "",
-  target: MONTHLY_TARGET_DEFAULT,
-  notes: "",
-};
-
-const emptyCashflow = {
-  id: null,
-  event_date: "",
-  amount: "",
-  type: "Tulo",
-  direction: "in",
-  description: "",
-  notes: "",
-  quote_id: "",
-  client_id: "",
-  calendar_event_id: "",
-  source_system: "CRM",
-  is_realized: false,
-};
-
-const emptyTemplate = {
-  id: null,
-  name: "",
-  service_name: "",
-  category: "",
-  unit: "kpl",
-  unit_price: "",
-  vat_rate: VAT_DEFAULT,
-  is_active: true,
-  description: "",
-};
-
-const emptyCalendarEvent = {
-  id: null,
-  client_id: "",
-  quote_id: "",
-  title: "",
-  event_type: "Kuvaus",
-  status: "Suunniteltu",
-  start_at: "",
-  end_at: "",
-  location: "",
-  notes: "",
-  source_system: "CRM",
-  is_billable: false,
-  amount_estimate: "",
-};
-
-const emptyAccountingDocument = {
-  id: null,
-  month: "",
-  document_type: "Tuloslaskelma",
-  source_system: "Netvisor",
-  file_name: "",
-  file_url: "",
-  storage_path: "",
-  notes: "",
-};
-
-const emptyAccountingMonthly = {
-  id: null,
-  month: "",
-  source_system: "Netvisor",
-  revenue: "",
-  other_income: "",
-  materials_and_services: "",
-  personnel_expenses: "",
-  other_operating_expenses: "",
-  depreciation: "",
-  operating_profit: "",
-  financial_items: "",
-  profit_before_appropriations: "",
-  balance_assets: "",
-  balance_liabilities: "",
-  equity: "",
-  cash_and_bank: "",
-  receivables: "",
-  payables: "",
-  notes: "",
-};
-
-const eur = (v) =>
-  new Intl.NumberFormat("fi-FI", {
-    style: "currency",
-    currency: "EUR",
-    maximumFractionDigits: 2,
-  }).format(Number(v || 0));
-
-const num = (v) => Number(v || 0);
-const today = () => new Date().toISOString().slice(0, 10);
-const fmtDate = (v) => (v ? new Date(v).toLocaleDateString("fi-FI") : "-");
-const fmtDateTime = (v) => (v ? new Date(v).toLocaleString("fi-FI") : "-");
-
-const addDays = (dateLike, days) => {
-  if (!dateLike) return "";
-  const d = new Date(dateLike);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setDate(d.getDate() + Number(days || 0));
-  return d.toISOString().slice(0, 10);
-};
-
-const nowLocalInput = () => {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}`;
-};
-
-const pct = (value) => `${Math.round(value)}%`;
-
-const normClientStatus = (s) =>
-  CLIENT_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Liidi";
-const normQuoteStatus = (s) =>
-  QUOTE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) || "Luonnos";
-const normInvoiceStatus = (s) =>
-  INVOICE_STATUSES.find((x) => x.toLowerCase() === String(s || "").toLowerCase()) ||
-  "Ei laskutettu";
-
-const traffic = (value, target) => {
-  if (!target || target <= 0) return { label: "Ei tavoitetta" };
-  const ratio = value / target;
-  if (ratio >= 1) return { label: "Vihreä" };
-  if (ratio >= 0.7) return { label: "Keltainen" };
-  return { label: "Punainen" };
-};
-
-const sx = {
-  page: {
-    minHeight: "100vh",
-    background:
-      "radial-gradient(circle at top left, rgba(90,49,132,.24), transparent 28%), radial-gradient(circle at top right, rgba(180,143,72,.08), transparent 22%), linear-gradient(180deg,#08070d 0%,#0c0a12 100%)",
-    color: "#f4f1e9",
-    fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif',
-  },
-  wrap: { maxWidth: 1680, margin: "0 auto", padding: "28px 20px 80px" },
-  card: {
-    background: "rgba(18,18,28,.92)",
-    border: "1px solid rgba(231,223,178,.10)",
-    borderRadius: 22,
-    padding: 20,
-  },
-  cardDark: {
-    background: "linear-gradient(180deg, rgba(23,20,34,.98), rgba(14,12,22,.98))",
-    border: "1px solid rgba(231,223,178,.12)",
-    borderRadius: 22,
-    padding: 20,
-  },
-  hero: {
-    background: "linear-gradient(135deg, rgba(29,22,43,.96), rgba(14,12,22,.98))",
-    border: "1px solid rgba(231,223,178,.12)",
-    borderRadius: 26,
-    padding: 26,
-  },
-  input: {
-    width: "100%",
-    background: "rgba(11,11,18,.92)",
-    color: "#f4f1e9",
-    border: "1px solid rgba(231,223,178,.14)",
-    borderRadius: 12,
-    padding: "11px 13px",
-    fontSize: 14,
-    outline: "none",
-  },
-  label: {
-    display: "block",
-    fontSize: 13,
-    fontWeight: 600,
-    color: "rgba(244,241,233,.78)",
-    marginBottom: 7,
-  },
-  btn: {
-    padding: "11px 15px",
-    borderRadius: 12,
-    fontWeight: 700,
-    fontSize: 14,
-    cursor: "pointer",
-  },
-  btnPrimary: {
-    background: "linear-gradient(135deg, rgba(217,201,138,1), rgba(162,126,56,1))",
-    color: "#17120d",
-    border: "1px solid rgba(231,223,178,.18)",
-  },
-  btnGhost: {
-    background: "transparent",
-    color: "#f4f1e9",
-    border: "1px solid rgba(231,223,178,.14)",
-  },
-  btnDanger: {
-    background: "rgba(120,31,49,.20)",
-    color: "#ffd7df",
-    border: "1px solid rgba(255,93,129,.22)",
-  },
-  table: { width: "100%", borderCollapse: "collapse", fontSize: 14 },
-  th: {
-    textAlign: "left",
-    padding: "12px 10px",
-    color: "rgba(244,241,233,.66)",
-    fontWeight: 700,
-    borderBottom: "1px solid rgba(231,223,178,.10)",
-  },
-  td: {
-    padding: "13px 10px",
-    borderBottom: "1px solid rgba(231,223,178,.08)",
-    verticalAlign: "top",
-  },
-  pill: {
-    display: "inline-flex",
-    padding: "5px 9px",
-    borderRadius: 999,
-    border: "1px solid rgba(231,223,178,.12)",
-    fontSize: 12,
-    fontWeight: 700,
-  },
-};
-
-function Btn({ children, variant = "primary", style = {}, ...props }) {
-  const v =
-    variant === "ghost"
-      ? sx.btnGhost
-      : variant === "danger"
-      ? sx.btnDanger
-      : sx.btnPrimary;
-  return (
-    <button {...props} style={{ ...sx.btn, ...v, ...style }}>
-      {children}
-    </button>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <label style={{ display: "block" }}>
-      <div style={sx.label}>{label}</div>
-      {children}
-    </label>
-  );
-}
-
-function Input(props) {
-  return <input {...props} style={{ ...sx.input, ...(props.style || {}) }} />;
-}
-
-function Select(props) {
-  return <select {...props} style={{ ...sx.input, ...(props.style || {}) }} />;
-}
-
-function TextArea(props) {
-  return (
-    <textarea
-      {...props}
-      style={{ ...sx.input, minHeight: 96, resize: "vertical", ...(props.style || {}) }}
-    />
-  );
-}
-
-function Title({ eyebrow, title, right }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "end",
-        gap: 16,
-        flexWrap: "wrap",
-        marginBottom: 16,
-      }}
-    >
-      <div>
-        <div
-          style={{
-            fontSize: 12,
-            textTransform: "uppercase",
-            letterSpacing: 0.8,
-            color: "#d9c98a",
-            marginBottom: 6,
-          }}
-        >
-          {eyebrow}
-        </div>
-        <h2 style={{ margin: 0, fontSize: 28, lineHeight: 1.1 }}>{title}</h2>
-      </div>
-      {right || null}
-    </div>
-  );
-}
-
-function Metric({ title, value, sub, accent = false }) {
-  return (
-    <div
-      style={{
-        ...sx.card,
-        background: accent
-          ? "linear-gradient(135deg, rgba(82,49,122,.95), rgba(28,18,49,.98))"
-          : sx.card.background,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 12,
-          textTransform: "uppercase",
-          color: "rgba(244,241,233,.72)",
-          marginBottom: 8,
-        }}
-      >
-        {title}
-      </div>
-      <div style={{ fontSize: 28, fontWeight: 900, lineHeight: 1.1 }}>{value}</div>
-      <div style={{ marginTop: 8, fontSize: 13, color: "rgba(244,241,233,.64)" }}>{sub}</div>
-    </div>
-  );
-}
-
-function StatPill({ label, good, warn, danger }) {
-  const style = danger
-    ? {
-        color: "#ffd7df",
-        background: "rgba(120,31,49,.18)",
-        border: "1px solid rgba(255,93,129,.18)",
-      }
-    : warn
-    ? {
-        color: "#fff1c7",
-        background: "rgba(217,201,138,.16)",
-        border: "1px solid rgba(217,201,138,.18)",
-      }
-    : {
-        color: "#ccffe0",
-        background: "rgba(71,137,94,.18)",
-        border: "1px solid rgba(125,212,156,.18)",
-      };
-  return <span style={{ ...sx.pill, ...style }}>{label}</span>;
-}
-
-function LinkChip({ href, label }) {
-  if (!href) return null;
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      style={{
-        ...sx.pill,
-        background: "rgba(231,223,178,.08)",
-        color: "#f4f1e9",
-        textDecoration: "none",
-      }}
-    >
-      {label}
-    </a>
-  );
-}
-	export default function Page() {
+export default function Page() {
   const [view, setView] = useState("dashboard");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
   const [clients, setClients] = useState([]);
-  const [quotes, setQuotes] = useState([]);
-  const [quoteLines, setQuoteLines] = useState([]);
+  const [contacts, setContacts] = useState([]);
+  const [tasks, setTasks] = useState([]);
   const [financeMonthly, setFinanceMonthly] = useState([]);
   const [cashflowEvents, setCashflowEvents] = useState([]);
-  const [calendarEvents, setCalendarEvents] = useState([]);
+  const [quotes, setQuotes] = useState([]);
+  const [quoteLines, setQuoteLines] = useState([]);
   const [pricingTemplates, setPricingTemplates] = useState([]);
   const [importLogs, setImportLogs] = useState([]);
+  const [calendarEvents, setCalendarEvents] = useState([]);
   const [accountingDocuments, setAccountingDocuments] = useState([]);
   const [accountingMonthly, setAccountingMonthly] = useState([]);
 
   const [clientForm, setClientForm] = useState(emptyClient);
+  const [contactForm, setContactForm] = useState(emptyContact);
+  const [taskForm, setTaskForm] = useState(emptyTask);
   const [quoteForm, setQuoteForm] = useState({
     ...emptyQuote,
     issue_date: today(),
@@ -886,12 +496,12 @@ function LinkChip({ href, label }) {
     ...emptyCashflow,
     event_date: today(),
   });
+  const [templateForm, setTemplateForm] = useState(emptyTemplate);
   const [calendarForm, setCalendarForm] = useState({
     ...emptyCalendarEvent,
     start_at: nowLocalInput(),
     end_at: nowLocalInput(),
   });
-  const [templateForm, setTemplateForm] = useState(emptyTemplate);
   const [accountingDocumentForm, setAccountingDocumentForm] = useState(emptyAccountingDocument);
   const [accountingMonthlyForm, setAccountingMonthlyForm] = useState(emptyAccountingMonthly);
 
@@ -899,17 +509,24 @@ function LinkChip({ href, label }) {
   const [crmStatusFilter, setCrmStatusFilter] = useState("Kaikki");
   const [quoteSearch, setQuoteSearch] = useState("");
   const [quoteStatusFilter, setQuoteStatusFilter] = useState("Kaikki");
+  const [financeFilter, setFinanceFilter] = useState("");
+  const [cashflowFilter, setCashflowFilter] = useState("Kaikki");
+  const [templateFilter, setTemplateFilter] = useState("");
   const [importFilter, setImportFilter] = useState("");
-  const [editingClientId, setEditingClientId] = useState(null);
-  const [editingTemplateId, setEditingTemplateId] = useState(null);
+  const [calendarFilter, setCalendarFilter] = useState("");
+  const [accountingFilter, setAccountingFilter] = useState("");
+  const [selectedQuoteId, setSelectedQuoteId] = useState(null);
+  const [selectedClientId, setSelectedClientId] = useState(null);
 
   const [busy, setBusy] = useState({
     client: false,
+    contact: false,
+    task: false,
     quote: false,
     finance: false,
     cashflow: false,
-    calendar: false,
     template: false,
+    calendar: false,
     accountingDocument: false,
     accountingMonthly: false,
     generatingQuoteNumber: false,
@@ -917,13 +534,14 @@ function LinkChip({ href, label }) {
     quoteCalendarId: null,
     quoteCashflowId: null,
   });
-
-  async function loadData() {
+}  async function loadData() {
     setLoading(true);
     setError("");
     try {
-      const [a, d, e, f, g, h, i, j, k, l] = await Promise.all([
+      const [a, b, c, d, e, f, g, h, i, j, k, l] = await Promise.all([
         supabase.from("clients").select("*").order("created_at", { ascending: false }),
+        supabase.from("contacts").select("*").order("created_at", { ascending: false }),
+        supabase.from("tasks").select("*").order("created_at", { ascending: false }),
         supabase.from("finance_monthly").select("*").order("month", { ascending: false }),
         supabase.from("cashflow_events").select("*").order("event_date", { ascending: false }),
         supabase.from("quotes").select("*").order("created_at", { ascending: false }),
@@ -935,11 +553,13 @@ function LinkChip({ href, label }) {
         supabase.from("accounting_monthly").select("*").order("month", { ascending: false }),
       ]);
 
-      for (const r of [a, d, e, f, g, h, i, j, k, l]) {
+      for (const r of [a, b, c, d, e, f, g, h, i, j, k, l]) {
         if (r.error) throw r.error;
       }
 
       setClients((a.data || []).map((x) => ({ ...x, status: normClientStatus(x.status) })));
+      setContacts(b.data || []);
+      setTasks(c.data || []);
       setFinanceMonthly(d.data || []);
       setCashflowEvents(e.data || []);
       setQuotes(
@@ -955,6 +575,9 @@ function LinkChip({ href, label }) {
       setCalendarEvents(j.data || []);
       setAccountingDocuments(k.data || []);
       setAccountingMonthly(l.data || []);
+
+      if (!selectedQuoteId && f.data?.length) setSelectedQuoteId(f.data[0].id);
+      if (!selectedClientId && a.data?.length) setSelectedClientId(a.data[0].id);
     } catch (err) {
       setError(err.message || "Datan haku epäonnistui.");
     } finally {
@@ -968,25 +591,52 @@ function LinkChip({ href, label }) {
 
   useEffect(() => {
     if (!success) return;
-    const t = setTimeout(() => setSuccess(""), 2400);
+    const t = setTimeout(() => setSuccess(""), 2600);
     return () => clearTimeout(t);
   }, [success]);
 
   const clientMap = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients]);
+  const quoteMap = useMemo(() => new Map(quotes.map((q) => [q.id, q])), [quotes]);
 
-  const quotesEnriched = useMemo(
-    () =>
-      quotes.map((q) => ({
-        ...q,
-        client: clientMap.get(q.client_id) || null,
-        lines: quoteLines
-          .filter((l) => l.quote_id === q.id)
-          .sort((a, b) => num(a.sort_order) - num(b.sort_order)),
-      })),
-    [quotes, quoteLines, clientMap]
+  const quotesEnriched = useMemo(() => {
+    return quotes.map((q) => ({
+      ...q,
+      client: clientMap.get(q.client_id) || null,
+      lines: quoteLines
+        .filter((l) => l.quote_id === q.id)
+        .sort((a, b) => num(a.sort_order) - num(b.sort_order)),
+    }));
+  }, [quotes, quoteLines, clientMap]);
+
+  const selectedClient = useMemo(
+    () => clients.find((c) => c.id === selectedClientId) || null,
+    [clients, selectedClientId]
+  );
+
+  const selectedQuote = useMemo(
+    () => quotesEnriched.find((q) => q.id === selectedQuoteId) || null,
+    [quotesEnriched, selectedQuoteId]
+  );
+
+  const selectedClientContacts = useMemo(
+    () => contacts.filter((x) => x.client_id === selectedClientId),
+    [contacts, selectedClientId]
+  );
+
+  const selectedClientTasks = useMemo(
+    () => tasks.filter((x) => x.client_id === selectedClientId),
+    [tasks, selectedClientId]
+  );
+
+  const selectedClientQuotes = useMemo(
+    () => quotesEnriched.filter((x) => x.client_id === selectedClientId),
+    [quotesEnriched, selectedClientId]
   );
 
   const dashboard = useMemo(() => {
+    const openTasks = tasks.filter((t) => !["done", "completed", "valmis"].includes(String(t.status || "").toLowerCase())).length;
+    const overdueTasks = tasks.filter((t) => t.due_date && new Date(t.due_date) < new Date() && !["done", "completed", "valmis"].includes(String(t.status || "").toLowerCase())).length;
+
     const quotePipeline = quotesEnriched
       .filter((q) => ["luonnos", "lähetetty"].includes(String(q.status || "").toLowerCase()))
       .reduce((s, q) => s + num(q.total), 0);
@@ -1004,19 +654,20 @@ function LinkChip({ href, label }) {
       .reduce((s, r) => s + num(r.amount), 0);
 
     const cashflowRealized = cashflowEvents
-      .filter(
-        (r) =>
-          r.is_realized === true || ["Tulo", "Meno"].includes(String(r.type || ""))
-      )
+      .filter((r) => r.is_realized === true || String(r.type || "") === "Tulo" || String(r.type || "") === "Meno")
       .reduce((s, r) => s + num(r.amount), 0);
 
     const latestMonth = financeMonthly[0] || null;
     const monthRevenue = num(latestMonth?.revenue);
     const monthTarget = num(latestMonth?.target || MONTHLY_TARGET_DEFAULT);
     const monthTraffic = traffic(monthRevenue, monthTarget);
+
     const accountingLatest = accountingMonthly[0] || null;
 
     return {
+      totalClients: clients.length,
+      openTasks,
+      overdueTasks,
       quotePipeline,
       quoteWon,
       quoteLost,
@@ -1027,16 +678,12 @@ function LinkChip({ href, label }) {
       monthTraffic,
       accountingLatest,
     };
-  }, [quotesEnriched, cashflowEvents, financeMonthly, accountingMonthly]);
+  }, [clients, tasks, quotesEnriched, cashflowEvents, financeMonthly, accountingMonthly]);
 
   const quoteTotals = useMemo(() => {
-    const subtotal = quoteDraftLines.reduce(
-      (s, l) => s + num(l.quantity) * num(l.unit_price),
-      0
-    );
+    const subtotal = quoteDraftLines.reduce((s, l) => s + num(l.quantity) * num(l.unit_price), 0);
     const vatAmount = subtotal * (num(quoteForm.vat_rate) / 100);
-    const totalWithVat = subtotal + vatAmount;
-    return { subtotal, vatAmount, totalWithVat };
+    return { subtotal, vatAmount, total: subtotal + vatAmount };
   }, [quoteDraftLines, quoteForm.vat_rate]);
 
   const filteredClients = useMemo(() => {
@@ -1060,8 +707,7 @@ function LinkChip({ href, label }) {
         [x.quote_number, x.title, x.client?.name, x.client?.company_name, x.invoice_number]
           .filter(Boolean)
           .some((v) => String(v).toLowerCase().includes(q));
-      const okStatus =
-        quoteStatusFilter === "Kaikki" || normQuoteStatus(x.status) === quoteStatusFilter;
+      const okStatus = quoteStatusFilter === "Kaikki" || normQuoteStatus(x.status) === quoteStatusFilter;
       return okSearch && okStatus;
     });
   }, [quotesEnriched, quoteSearch, quoteStatusFilter]);
@@ -1071,21 +717,34 @@ function LinkChip({ href, label }) {
       revenue: financeMonthly.reduce((s, r) => s + num(r.revenue), 0),
       expenses: financeMonthly.reduce((s, r) => s + num(r.expenses), 0),
       profit: financeMonthly.reduce(
-        (s, r) =>
-          s +
-          num(
-            r.profit !== null && r.profit !== undefined
-              ? r.profit
-              : num(r.revenue) - num(r.expenses)
-          ),
+        (s, r) => s + num(r.profit !== null && r.profit !== undefined ? r.profit : num(r.revenue) - num(r.expenses)),
         0
       ),
       target: financeMonthly.reduce((s, r) => s + num(r.target), 0),
       cashflow: cashflowEvents.reduce((s, r) => s + num(r.amount), 0),
     }),
     [financeMonthly, cashflowEvents]
-  );
-	    async function generateQuoteNumber() {
+  );  const resetClient = () => setClientForm(emptyClient);
+  const resetContact = () => setContactForm({ ...emptyContact, client_id: selectedClientId || "" });
+  const resetTask = () => setTaskForm({ ...emptyTask, client_id: selectedClientId || "", due_date: today() });
+  const resetQuote = () => {
+    const base = today();
+    setQuoteForm({
+      ...emptyQuote,
+      issue_date: base,
+      valid_until: addDays(base, 14),
+      client_id: selectedClientId || "",
+    });
+    setQuoteDraftLines([{ id: `d-${Date.now()}`, description: "", quantity: 1, unit_price: 0, sort_order: 1 }]);
+  };
+  const resetFinance = () => setFinanceForm({ ...emptyFinance, target: MONTHLY_TARGET_DEFAULT });
+  const resetCashflow = () => setCashflowForm({ ...emptyCashflow, event_date: today() });
+  const resetTemplate = () => setTemplateForm(emptyTemplate);
+  const resetCalendar = () => setCalendarForm({ ...emptyCalendarEvent, start_at: nowLocalInput(), end_at: nowLocalInput() });
+  const resetAccountingDocument = () => setAccountingDocumentForm(emptyAccountingDocument);
+  const resetAccountingMonthly = () => setAccountingMonthlyForm(emptyAccountingMonthly);
+
+  async function generateQuoteNumber() {
     setBusy((b) => ({ ...b, generatingQuoteNumber: true }));
     try {
       const { data, error } = await supabase.rpc("get_next_quote_number");
@@ -1112,81 +771,93 @@ function LinkChip({ href, label }) {
     }));
   }
 
-  function startEditClient(client) {
-    setClientForm({ ...emptyClient, ...client });
-    setEditingClientId(client.id);
-    setView("crm");
-  }
-
-  function startEditTemplate(template) {
-    setTemplateForm({
-      ...emptyTemplate,
-      ...template,
-      unit_price: String(template.unit_price ?? ""),
-      vat_rate: String(template.vat_rate ?? VAT_DEFAULT),
-    });
-    setEditingTemplateId(template.id);
-    setView("settings");
-  }
-
-  function resetClientForm() {
-    setClientForm(emptyClient);
-    setEditingClientId(null);
-  }
-
-  function resetTemplateForm() {
-    setTemplateForm(emptyTemplate);
-    setEditingTemplateId(null);
-  }
-
   const addDraftLine = () =>
     setQuoteDraftLines((prev) => [
       ...prev,
-      {
-        id: `d-${Date.now()}-${prev.length + 1}`,
-        description: "",
-        quantity: 1,
-        unit_price: 0,
-        sort_order: prev.length + 1,
-      },
+      { id: `d-${Date.now()}-${prev.length + 1}`, description: "", quantity: 1, unit_price: 0, sort_order: prev.length + 1 },
     ]);
 
   const updateDraftLine = (id, key, value) =>
-    setQuoteDraftLines((prev) =>
-      prev.map((l) => (l.id === id ? { ...l, [key]: value } : l))
-    );
+    setQuoteDraftLines((prev) => prev.map((l) => (l.id === id ? { ...l, [key]: value } : l)));
 
   const removeDraftLine = (id) =>
     setQuoteDraftLines((prev) =>
       prev.filter((l) => l.id !== id).map((l, i) => ({ ...l, sort_order: i + 1 }))
     );
 
+  const addTemplateToQuote = (tpl) =>
+    setQuoteDraftLines((prev) => [
+      ...prev,
+      {
+        id: `tpl-${tpl.id}-${Date.now()}`,
+        description: tpl.name || tpl.service_name || "Palvelu",
+        quantity: 1,
+        unit_price: num(tpl.unit_price),
+        sort_order: prev.length + 1,
+      },
+    ]);
+
   async function saveClient(e) {
     e.preventDefault();
     setBusy((b) => ({ ...b, client: true }));
     try {
       if (!clientForm.name?.trim()) throw new Error("Asiakkaan nimi on pakollinen.");
-      const payload = {
-        ...clientForm,
-        updated_at: new Date().toISOString(),
-      };
-      delete payload.id;
+      const payload = { ...clientForm, updated_at: new Date().toISOString() };
 
-      const q = editingClientId
-        ? await supabase.from("clients").update(payload).eq("id", editingClientId)
-        : await supabase.from("clients").insert({
-            ...payload,
-            created_at: new Date().toISOString(),
-          });
+      const q = clientForm.id
+        ? await supabase.from("clients").update(payload).eq("id", clientForm.id)
+        : await supabase.from("clients").insert({ ...payload, created_at: new Date().toISOString() });
 
       if (q.error) throw q.error;
-      setSuccess(editingClientId ? "Asiakas päivitetty." : "Asiakas lisätty.");
-      resetClientForm();
+      setSuccess(clientForm.id ? "Asiakas päivitetty." : "Asiakas lisätty.");
+      resetClient();
       await loadData();
     } catch (err) {
       setError(err.message || "Asiakkaan tallennus epäonnistui.");
     } finally {
       setBusy((b) => ({ ...b, client: false }));
+    }
+  }
+
+  async function saveContact(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, contact: true }));
+    try {
+      if (!contactForm.client_id) throw new Error("Valitse asiakas.");
+      if (!contactForm.name?.trim()) throw new Error("Kontaktin nimi on pakollinen.");
+      const q = contactForm.id
+        ? await supabase.from("contacts").update(contactForm).eq("id", contactForm.id)
+        : await supabase.from("contacts").insert({ ...contactForm, created_at: new Date().toISOString() });
+
+      if (q.error) throw q.error;
+      setSuccess(contactForm.id ? "Kontakti päivitetty." : "Kontakti lisätty.");
+      resetContact();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kontaktin tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, contact: false }));
+    }
+  }
+
+  async function saveTask(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, task: true }));
+    try {
+      if (!taskForm.client_id) throw new Error("Valitse asiakas.");
+      if (!taskForm.title?.trim()) throw new Error("Tehtävän otsikko on pakollinen.");
+      const q = taskForm.id
+        ? await supabase.from("tasks").update(taskForm).eq("id", taskForm.id)
+        : await supabase.from("tasks").insert({ ...taskForm, created_at: new Date().toISOString() });
+
+      if (q.error) throw q.error;
+      setSuccess(taskForm.id ? "Tehtävä päivitetty." : "Tehtävä lisätty.");
+      resetTask();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Tehtävän tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, task: false }));
     }
   }
 
@@ -1216,45 +887,76 @@ function LinkChip({ href, label }) {
         payment_terms_days: num(quoteForm.payment_terms_days),
         subtotal: quoteTotals.subtotal,
         vat_amount: quoteTotals.vatAmount,
-        total: quoteTotals.totalWithVat,
+        total: quoteTotals.total,
         updated_at: new Date().toISOString(),
       };
-      delete payload.id;
 
-      const ins = await supabase
-        .from("quotes")
-        .insert({
-          ...payload,
-          created_at: new Date().toISOString(),
-        })
-        .select()
-        .single();
+      let quoteId = quoteForm.id;
 
-      if (ins.error) throw ins.error;
+      if (quoteId) {
+        const u = await supabase.from("quotes").update(payload).eq("id", quoteId);
+        if (u.error) throw u.error;
 
-      const linesIns = await supabase.from("quote_lines").insert(
+        const d = await supabase.from("quote_lines").delete().eq("quote_id", quoteId);
+        if (d.error) throw d.error;
+      } else {
+        const i = await supabase
+          .from("quotes")
+          .insert({ ...payload, created_at: new Date().toISOString() })
+          .select()
+          .single();
+
+        if (i.error) throw i.error;
+        quoteId = i.data.id;
+      }
+
+      const ins = await supabase.from("quote_lines").insert(
         lines.map((l) => ({
           ...l,
-          quote_id: ins.data.id,
+          quote_id: quoteId,
           created_at: new Date().toISOString(),
         }))
       );
-      if (linesIns.error) throw linesIns.error;
+      if (ins.error) throw ins.error;
 
-      setSuccess("Tarjous lisätty.");
-      setQuoteForm({
-        ...emptyQuote,
-        issue_date: today(),
-        valid_until: addDays(today(), 14),
-      });
-      setQuoteDraftLines([
-        { id: `d-${Date.now()}`, description: "", quantity: 1, unit_price: 0, sort_order: 1 },
-      ]);
+      setSuccess(quoteForm.id ? "Tarjous päivitetty." : "Tarjous lisätty.");
+      resetQuote();
       await loadData();
     } catch (err) {
       setError(err.message || "Tarjouksen tallennus epäonnistui.");
     } finally {
       setBusy((b) => ({ ...b, quote: false }));
+    }
+  }  async function createCalendarFromQuote(quoteId) {
+    setBusy((b) => ({ ...b, quoteCalendarId: quoteId }));
+    try {
+      const { error } = await supabase.rpc("create_calendar_event_from_quote", {
+        p_quote_id: quoteId,
+        p_event_type: "Kuvaus",
+      });
+      if (error) throw error;
+      setSuccess("Kalenterivaraus luotu tarjoukselta.");
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kalenterivarauksen luonti epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, quoteCalendarId: null }));
+    }
+  }
+
+  async function createCashflowFromQuote(quoteId) {
+    setBusy((b) => ({ ...b, quoteCashflowId: quoteId }));
+    try {
+      const { error } = await supabase.rpc("create_cashflow_from_quote", {
+        p_quote_id: quoteId,
+      });
+      if (error) throw error;
+      setSuccess("Kassavirtaennuste luotu tarjoukselta.");
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kassavirtaennusteen luonti epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, quoteCashflowId: null }));
     }
   }
 
@@ -1271,19 +973,233 @@ function LinkChip({ href, label }) {
       setBusy((b) => ({ ...b, invoicingQuoteId: null }));
     }
   }
-	    return (
+
+  async function saveFinance(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, finance: true }));
+    try {
+      const payload = {
+        ...financeForm,
+        revenue: num(financeForm.revenue),
+        expenses: num(financeForm.expenses),
+        profit: financeForm.profit !== "" ? num(financeForm.profit) : num(financeForm.revenue) - num(financeForm.expenses),
+        target: num(financeForm.target),
+      };
+
+      const q = financeForm.id
+        ? await supabase.from("finance_monthly").update(payload).eq("id", financeForm.id)
+        : await supabase.from("finance_monthly").insert({ ...payload, created_at: new Date().toISOString() });
+
+      if (q.error) throw q.error;
+      setSuccess(financeForm.id ? "Kuukausirivi päivitetty." : "Kuukausirivi lisätty.");
+      resetFinance();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kuukausirivin tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, finance: false }));
+    }
+  }
+
+  async function saveCashflow(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, cashflow: true }));
+    try {
+      const payload = {
+        ...cashflowForm,
+        amount: num(cashflowForm.amount),
+      };
+
+      const q = cashflowForm.id
+        ? await supabase.from("cashflow_events").update(payload).eq("id", cashflowForm.id)
+        : await supabase.from("cashflow_events").insert({ ...payload, created_at: new Date().toISOString() });
+
+      if (q.error) throw q.error;
+      setSuccess(cashflowForm.id ? "Kassavirtarivi päivitetty." : "Kassavirtarivi lisätty.");
+      resetCashflow();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kassavirran tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, cashflow: false }));
+    }
+  }
+
+  async function saveCalendarEvent(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, calendar: true }));
+    try {
+      if (!calendarForm.title?.trim()) throw new Error("Otsikko on pakollinen.");
+      const payload = {
+        ...calendarForm,
+        start_at: new Date(calendarForm.start_at).toISOString(),
+        end_at: new Date(calendarForm.end_at).toISOString(),
+        amount_estimate: num(calendarForm.amount_estimate),
+      };
+
+      const q = calendarForm.id
+        ? await supabase.from("calendar_events").update(payload).eq("id", calendarForm.id)
+        : await supabase.from("calendar_events").insert({
+            ...payload,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+
+      if (q.error) throw q.error;
+      setSuccess(calendarForm.id ? "Kalenteritapahtuma päivitetty." : "Kalenteritapahtuma lisätty.");
+      resetCalendar();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kalenterin tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, calendar: false }));
+    }
+  }
+
+  async function saveTemplate(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, template: true }));
+    try {
+      const payload = {
+        ...templateForm,
+        name: templateForm.name || templateForm.service_name,
+        service_name: templateForm.service_name || templateForm.name,
+        unit_price: num(templateForm.unit_price),
+        vat_rate: num(templateForm.vat_rate),
+      };
+
+      const q = templateForm.id
+        ? await supabase.from("pricing_templates").update(payload).eq("id", templateForm.id)
+        : await supabase.from("pricing_templates").insert({ ...payload, created_at: new Date().toISOString() });
+
+      if (q.error) throw q.error;
+      setSuccess(templateForm.id ? "Hinnoittelupohja päivitetty." : "Hinnoittelupohja lisätty.");
+      resetTemplate();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Hinnoittelupohjan tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, template: false }));
+    }
+  }
+
+  async function saveAccountingDocument(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, accountingDocument: true }));
+    try {
+      const q = accountingDocumentForm.id
+        ? await supabase.from("accounting_documents").update(accountingDocumentForm).eq("id", accountingDocumentForm.id)
+        : await supabase.from("accounting_documents").insert({
+            ...accountingDocumentForm,
+            uploaded_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          });
+
+      if (q.error) throw q.error;
+
+      await supabase.from("import_logs").insert({
+        import_type: accountingDocumentForm.document_type,
+        source_name: accountingDocumentForm.file_url || accountingDocumentForm.file_name || "Kirjanpidon aineisto",
+        status: "Tallennettu",
+        row_count: 1,
+        message: `Kirjanpidon aineisto tallennettu (${accountingDocumentForm.source_system})`,
+        source_system: accountingDocumentForm.source_system,
+        file_name: accountingDocumentForm.file_name || null,
+        month: accountingDocumentForm.month || null,
+        imported_at: new Date().toISOString(),
+      });
+
+      setSuccess("Kirjanpidon aineisto tallennettu.");
+      resetAccountingDocument();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kirjanpidon aineiston tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, accountingDocument: false }));
+    }
+  }
+
+  async function saveAccountingMonthly(e) {
+    e.preventDefault();
+    setBusy((b) => ({ ...b, accountingMonthly: true }));
+    try {
+      const payload = Object.fromEntries(
+        Object.entries(accountingMonthlyForm).map(([k, v]) => [
+          k,
+          [
+            "revenue",
+            "other_income",
+            "materials_and_services",
+            "personnel_expenses",
+            "other_operating_expenses",
+            "depreciation",
+            "operating_profit",
+            "financial_items",
+            "profit_before_appropriations",
+            "balance_assets",
+            "balance_liabilities",
+            "equity",
+            "cash_and_bank",
+            "receivables",
+            "payables",
+          ].includes(k)
+            ? num(v)
+            : v,
+        ])
+      );
+
+      const q = accountingMonthlyForm.id
+        ? await supabase.from("accounting_monthly").update(payload).eq("id", accountingMonthlyForm.id)
+        : await supabase.from("accounting_monthly").insert({
+            ...payload,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+
+      if (q.error) throw q.error;
+      setSuccess("Kirjanpidon kuukausitarkennus tallennettu.");
+      resetAccountingMonthly();
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Kirjanpidon kuukausitarkennuksen tallennus epäonnistui.");
+    } finally {
+      setBusy((b) => ({ ...b, accountingMonthly: false }));
+    }
+  }  const nav = [
+    ["dashboard", "Dashboard"],
+    ["crm", "CRM"],
+    ["quotes", "Tarjoukset"],
+    ["finance", "Talous"],
+    ["calendar", "Kalenteri"],
+    ["settings", "Asetukset"],
+  ];
+
+  return (
     <div style={sx.page}>
       <div style={sx.wrap}>
         <header style={{ display: "grid", gridTemplateColumns: "1.15fr .85fr", gap: 18, marginBottom: 22 }}>
           <div style={sx.hero}>
-            <div style={{ display: "inline-flex", padding: "8px 12px", borderRadius: 999, background: "rgba(231,223,178,.10)", border: "1px solid rgba(231,223,178,.12)", fontSize: 12, color: "#d9c98a", fontWeight: 700, marginBottom: 14 }}>
-              SALOPINO CRM / TALOUSOHJAUS V6.1
+            <div
+              style={{
+                display: "inline-flex",
+                padding: "8px 12px",
+                borderRadius: 999,
+                background: "rgba(231,223,178,.10)",
+                border: "1px solid rgba(231,223,178,.12)",
+                fontSize: 12,
+                color: "#d9c98a",
+                fontWeight: 700,
+                marginBottom: 14,
+              }}
+            >
+              SALOPINO CRM / TALOUSOHJAUS V6
             </div>
             <h1 style={{ margin: "0 0 10px", fontSize: 42, lineHeight: 1.05, fontWeight: 900 }}>
               Tarjous → kalenteri → kassavirta → kirjanpito
             </h1>
             <p style={{ margin: 0, color: "rgba(244,241,233,.74)", fontSize: 16, lineHeight: 1.7 }}>
-              V6.1 korjaa ID-, direction-, ALV-, muokkaus- ja talousongelmat sekä tuo Netvisor-linkit näkyvästi mukaan.
+              V6 tuo mukaan tarjouskohtaisen kalenterivarauksen, kassavirtaennusteen sekä Netvisorista tuotavien
+              kirjanpidon aineistojen hallinnan.
             </p>
           </div>
 
@@ -1352,7 +1268,12 @@ function LinkChip({ href, label }) {
                       <div><strong>Kuukauden liikevaihto:</strong> {eur(dashboard.monthRevenue)}</div>
                       <div><strong>Tavoite:</strong> {eur(dashboard.monthTarget)}</div>
                       <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        <StatPill label={dashboard.monthTraffic.label} good={dashboard.monthTraffic.label === "Vihreä"} warn={dashboard.monthTraffic.label === "Keltainen"} danger={dashboard.monthTraffic.label === "Punainen"} />
+                        <StatPill
+                          label={dashboard.monthTraffic.label}
+                          good={dashboard.monthTraffic.label === "Vihreä"}
+                          warn={dashboard.monthTraffic.label === "Keltainen"}
+                          danger={dashboard.monthTraffic.label === "Punainen"}
+                        />
                         <span>{pct(dashboard.monthTarget ? (dashboard.monthRevenue / dashboard.monthTarget) * 100 : 0)}</span>
                       </div>
                     </div>
@@ -1369,9 +1290,10 @@ function LinkChip({ href, label }) {
                   </div>
 
                   <div style={sx.card}>
-                    <Title eyebrow="Prosessi" title="V6.1-logiikka" />
+                    <Title eyebrow="Prosessi" title="V6-logiikka" />
                     <div style={{ lineHeight: 1.8, color: "rgba(244,241,233,.74)" }}>
-                      Tarjoukselta voi luoda kuvausvarauksen kalenteriin ja kassavirtaennusteen. Talousnäkymässä voit lisätä Netvisor-linkkejä ja kirjata kuukausitarkennukset.
+                      Tarjoukselta voi luoda kuvausvarauksen kalenteriin sekä kassavirtaennusteen.
+                      Talous-näkymään voi tallentaa Netvisorista tuotujen raporttien linkit ja kuukausitarkennukset.
                     </div>
                   </div>
                 </div>
@@ -1383,7 +1305,7 @@ function LinkChip({ href, label }) {
                 <Title eyebrow="Asiakkuudet" title="CRM" />
                 <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
                   <div style={sx.cardDark}>
-                    <Title eyebrow={editingClientId ? "Muokkaus" : "Uusi asiakas"} title={editingClientId ? "Päivitä asiakas" : "Lisää asiakas"} />
+                    <Title eyebrow="Uusi asiakas" title="Lisää asiakas" />
                     <form onSubmit={saveClient}>
                       <div style={{ display: "grid", gap: 12 }}>
                         <Field label="Nimi *"><Input value={clientForm.name} onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })} /></Field>
@@ -1401,10 +1323,7 @@ function LinkChip({ href, label }) {
                         <Field label="Asiakastieto-linkki"><Input value={clientForm.asiakastieto_url} onChange={(e) => setClientForm({ ...clientForm, asiakastieto_url: e.target.value })} /></Field>
                         <Field label="LinkedIn-linkki"><Input value={clientForm.linkedin_url} onChange={(e) => setClientForm({ ...clientForm, linkedin_url: e.target.value })} /></Field>
                         <Field label="Muistiinpanot"><TextArea value={clientForm.notes} onChange={(e) => setClientForm({ ...clientForm, notes: e.target.value })} /></Field>
-                        <div style={{ display: "flex", gap: 10 }}>
-                          <Btn type="submit">{busy.client ? "Tallennetaan..." : editingClientId ? "Päivitä" : "Tallenna"}</Btn>
-                          {editingClientId && <Btn type="button" variant="ghost" onClick={resetClientForm}>Peruuta</Btn>}
-                        </div>
+                        <Btn type="submit">{busy.client ? "Tallennetaan..." : "Tallenna"}</Btn>
                       </div>
                     </form>
                   </div>
@@ -1423,7 +1342,11 @@ function LinkChip({ href, label }) {
 
                     <table style={sx.table}>
                       <thead>
-                        <tr>{["Nimi", "Yritys", "Status", "Yhteystiedot", "Toiminnot"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                        <tr>
+                          {["Nimi", "Yritys", "Status", "Yhteystiedot", "Linkit"].map((h) => (
+                            <th key={h} style={sx.th}>{h}</th>
+                          ))}
+                        </tr>
                       </thead>
                       <tbody>
                         {filteredClients.map((c) => (
@@ -1434,7 +1357,6 @@ function LinkChip({ href, label }) {
                             <td style={sx.td}>{c.email || "-"}<br />{c.phone || "-"}</td>
                             <td style={sx.td}>
                               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                                <Btn variant="ghost" onClick={() => startEditClient(c)}>Muokkaa</Btn>
                                 <LinkChip href={c.finder_url} label="Finder" />
                                 <LinkChip href={c.asiakastieto_url} label="Asiakastieto" />
                                 <LinkChip href={c.linkedin_url} label="LinkedIn" />
@@ -1447,11 +1369,20 @@ function LinkChip({ href, label }) {
                   </div>
                 </div>
               </section>
-            )}
-
-            {view === "quotes" && (
+            )}            {view === "quotes" && (
               <section>
-                <Title eyebrow="Tarjoukset" title="Tarjousten hallinta" right={<div style={{ display: "flex", gap: 10 }}><Btn variant="ghost" onClick={generateQuoteNumber}>{busy.generatingQuoteNumber ? "Haetaan..." : "Generoi nro"}</Btn><Btn variant="ghost" onClick={loadData}>Päivitä</Btn></div>} />
+                <Title
+                  eyebrow="Tarjoukset"
+                  title="Tarjousten hallinta"
+                  right={
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <Btn variant="ghost" onClick={generateQuoteNumber}>
+                        {busy.generatingQuoteNumber ? "Haetaan..." : "Generoi nro"}
+                      </Btn>
+                      <Btn variant="ghost" onClick={loadData}>Päivitä</Btn>
+                    </div>
+                  }
+                />
                 <div style={{ display: "grid", gridTemplateColumns: "560px 1fr", gap: 18 }}>
                   <div style={sx.cardDark}>
                     <form onSubmit={saveQuote}>
@@ -1492,6 +1423,17 @@ function LinkChip({ href, label }) {
                           </Select>
                         </Field>
 
+                        <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <input type="checkbox" checked={!!quoteForm.auto_create_calendar} onChange={(e) => setQuoteForm({ ...quoteForm, auto_create_calendar: e.target.checked })} />
+                            <span>Luo kalenteri tarjoukselta</span>
+                          </label>
+                          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <input type="checkbox" checked={!!quoteForm.auto_create_cashflow} onChange={(e) => setQuoteForm({ ...quoteForm, auto_create_cashflow: e.target.checked })} />
+                            <span>Luo kassavirtaennuste tarjoukselta</span>
+                          </label>
+                        </div>
+
                         <div style={{ padding: 14, borderRadius: 16, background: "rgba(10,10,16,.58)", border: "1px solid rgba(231,223,178,.12)" }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                             <strong>Tarjousrivit</strong>
@@ -1514,9 +1456,9 @@ function LinkChip({ href, label }) {
                           </div>
 
                           <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                            <Metric title="ALV 0%" value={eur(quoteTotals.subtotal)} sub="veroton" />
-                            <Metric title={`ALV ${quoteForm.vat_rate}%`} value={eur(quoteTotals.vatAmount)} sub="veron osuus" />
-                            <Metric title="ALV 25.5% mukana" value={eur(quoteTotals.totalWithVat)} sub="kokonaissumma" accent />
+                            <Metric title="Veroton" value={eur(quoteTotals.subtotal)} sub="ALV 0 oletus" />
+                            <Metric title="ALV" value={eur(quoteTotals.vatAmount)} sub={`${quoteForm.vat_rate}%`} />
+                            <Metric title="Yhteensä" value={eur(quoteTotals.total)} sub="Tarjoussumma" accent />
                           </div>
                         </div>
 
@@ -1532,7 +1474,11 @@ function LinkChip({ href, label }) {
                     <Title eyebrow="Tarjouslista" title="Tallennetut tarjoukset" />
                     <table style={sx.table}>
                       <thead>
-                        <tr>{["Nro", "Otsikko", "Status", "Kuvauspäivä", "Laskutus", "Summa", "Toiminnot"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                        <tr>
+                          {["Nro", "Otsikko", "Status", "Kuvauspäivä", "Laskutus", "Summa", "Toiminnot"].map((h) => (
+                            <th key={h} style={sx.th}>{h}</th>
+                          ))}
+                        </tr>
                       </thead>
                       <tbody>
                         {filteredQuotes.map((q) => (
@@ -1548,10 +1494,10 @@ function LinkChip({ href, label }) {
                                 <Btn variant="ghost" onClick={() => invoiceQuote(q.id)}>
                                   {busy.invoicingQuoteId === q.id ? "..." : "Laskuta"}
                                 </Btn>
-                                <Btn variant="ghost" onClick={() => createCalendarFromQuote(q)}>
+                                <Btn variant="ghost" onClick={() => createCalendarFromQuote(q.id)}>
                                   {busy.quoteCalendarId === q.id ? "..." : "Kalenteri"}
                                 </Btn>
-                                <Btn variant="ghost" onClick={() => createCashflowFromQuote(q)}>
+                                <Btn variant="ghost" onClick={() => createCashflowFromQuote(q.id)}>
                                   {busy.quoteCashflowId === q.id ? "..." : "Kassavirta"}
                                 </Btn>
                               </div>
@@ -1582,26 +1528,22 @@ function LinkChip({ href, label }) {
                       </div>
                     </form>
 
-                    <form onSubmit={saveCashflow} style={{ marginBottom: 22 }}>
-                      <Title eyebrow="cashflow_events" title="Kassavirtarivi" />
-                      <div style={{ display: "grid", gap: 12 }}>
-                        <Field label="Päivä"><Input type="date" value={cashflowForm.event_date} onChange={(e) => setCashflowForm({ ...cashflowForm, event_date: e.target.value })} /></Field>
-                        <Field label="Summa"><Input type="number" value={cashflowForm.amount} onChange={(e) => setCashflowForm({ ...cashflowForm, amount: e.target.value })} /></Field>
-                        <Field label="Tyyppi"><Select value={cashflowForm.type} onChange={(e) => setCashflowForm({ ...cashflowForm, type: e.target.value })}>{CASHFLOW_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}</Select></Field>
-                        <Field label="Direction"><Select value={cashflowForm.direction} onChange={(e) => setCashflowForm({ ...cashflowForm, direction: e.target.value })}>{CASHFLOW_DIRECTIONS.map((t) => <option key={t} value={t}>{t}</option>)}</Select></Field>
-                        <Field label="Kuvaus"><Input value={cashflowForm.description} onChange={(e) => setCashflowForm({ ...cashflowForm, description: e.target.value })} /></Field>
-                        <Btn type="submit">{busy.cashflow ? "Tallennetaan..." : "Tallenna kassavirta"}</Btn>
-                      </div>
-                    </form>
-
                     <form onSubmit={saveAccountingDocument} style={{ marginBottom: 22 }}>
                       <Title eyebrow="Netvisor / tiedostot / linkit" title="Kirjanpidon aineisto" />
                       <div style={{ display: "grid", gap: 12 }}>
                         <Field label="Kuukausi"><Input value={accountingDocumentForm.month} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, month: e.target.value })} placeholder="2026-04" /></Field>
-                        <Field label="Dokumenttityyppi"><Select value={accountingDocumentForm.document_type} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, document_type: e.target.value })}>{ACCOUNTING_DOC_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
-                        <Field label="Lähdejärjestelmä"><Select value={accountingDocumentForm.source_system} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, source_system: e.target.value })}>{SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
+                        <Field label="Dokumenttityyppi">
+                          <Select value={accountingDocumentForm.document_type} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, document_type: e.target.value })}>
+                            {ACCOUNTING_DOC_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Lähdejärjestelmä">
+                          <Select value={accountingDocumentForm.source_system} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, source_system: e.target.value })}>
+                            {SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
                         <Field label="Tiedoston nimi"><Input value={accountingDocumentForm.file_name} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, file_name: e.target.value })} /></Field>
-                        <Field label="Lataa linkki / Netvisor-linkki"><Input value={accountingDocumentForm.file_url} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, file_url: e.target.value })} /></Field>
+                        <Field label="Tiedostolinkki / Netvisor-linkki"><Input value={accountingDocumentForm.file_url} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, file_url: e.target.value })} /></Field>
                         <Field label="Muistiinpanot"><TextArea value={accountingDocumentForm.notes} onChange={(e) => setAccountingDocumentForm({ ...accountingDocumentForm, notes: e.target.value })} /></Field>
                         <Btn type="submit">{busy.accountingDocument ? "Tallennetaan..." : "Tallenna aineisto"}</Btn>
                       </div>
@@ -1611,7 +1553,11 @@ function LinkChip({ href, label }) {
                       <Title eyebrow="accounting_monthly" title="Kirjanpidon kuukausitarkennus" />
                       <div style={{ display: "grid", gap: 12 }}>
                         <Field label="Kuukausi"><Input value={accountingMonthlyForm.month} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, month: e.target.value })} placeholder="2026-04" /></Field>
-                        <Field label="Lähdejärjestelmä"><Select value={accountingMonthlyForm.source_system} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, source_system: e.target.value })}>{SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
+                        <Field label="Lähdejärjestelmä">
+                          <Select value={accountingMonthlyForm.source_system} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, source_system: e.target.value })}>
+                            {SOURCE_SYSTEMS.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
                         <Field label="Liikevaihto"><Input type="number" value={accountingMonthlyForm.revenue} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, revenue: e.target.value })} /></Field>
                         <Field label="Muut liiketoiminnan kulut"><Input type="number" value={accountingMonthlyForm.other_operating_expenses} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, other_operating_expenses: e.target.value })} /></Field>
                         <Field label="Liiketulos"><Input type="number" value={accountingMonthlyForm.operating_profit} onChange={(e) => setAccountingMonthlyForm({ ...accountingMonthlyForm, operating_profit: e.target.value })} /></Field>
@@ -1637,28 +1583,25 @@ function LinkChip({ href, label }) {
                         <h3 style={{ marginTop: 0 }}>Kirjanpidon aineistot</h3>
                         <table style={sx.table}>
                           <thead>
-                            <tr>{["Kuukausi", "Tyyppi", "Lähde", "Toiminnot"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                            <tr>
+                              {["Kuukausi", "Tyyppi", "Lähde", "Tiedosto / linkki"].map((h) => (
+                                <th key={h} style={sx.th}>{h}</th>
+                              ))}
+                            </tr>
                           </thead>
                           <tbody>
-                            {accountingDocuments.map((r) => (
-                              <tr key={r.id}>
-                                <td style={sx.td}>{r.month || "-"}</td>
-                                <td style={sx.td}>{r.document_type || "-"}</td>
-                                <td style={sx.td}>{r.source_system || "-"}</td>
-                                <td style={sx.td}>
-                                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                                    {r.file_url ? (
-                                      <a href={r.file_url} target="_blank" rel="noreferrer" style={{ color: "#d9c98a" }}>
-                                        {r.file_name || "Avaa linkki"}
-                                      </a>
-                                    ) : (
-                                      <span>{r.file_name || "-"}</span>
-                                    )}
-                                    <Btn variant="ghost" onClick={() => analyzeAccounting(r)}>AI tarkasta</Btn>
-                                  </div>
-                                </td>
-                              </tr>
-                            ))}
+                            {accountingDocuments
+                              .filter((r) => !accountingFilter || String(r.month || "").includes(accountingFilter))
+                              .map((r) => (
+                                <tr key={r.id}>
+                                  <td style={sx.td}>{r.month || "-"}</td>
+                                  <td style={sx.td}>{r.document_type || "-"}</td>
+                                  <td style={sx.td}>{r.source_system || "-"}</td>
+                                  <td style={sx.td}>
+                                    {r.file_url ? <a href={r.file_url} target="_blank" rel="noreferrer" style={{ color: "#d9c98a" }}>{r.file_name || r.file_url}</a> : r.file_name || "-"}
+                                  </td>
+                                </tr>
+                              ))}
                           </tbody>
                         </table>
                       </div>
@@ -1667,7 +1610,11 @@ function LinkChip({ href, label }) {
                         <h3 style={{ marginTop: 0 }}>Kirjanpidon kuukausitarkennukset</h3>
                         <table style={sx.table}>
                           <thead>
-                            <tr>{["Kuukausi", "Liikevaihto", "Liiketulos", "Pankki", "Oma pääoma"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                            <tr>
+                              {["Kuukausi", "Liikevaihto", "Liiketulos", "Pankki", "Oma pääoma"].map((h) => (
+                                <th key={h} style={sx.th}>{h}</th>
+                              ))}
+                            </tr>
                           </thead>
                           <tbody>
                             {accountingMonthly.map((r) => (
@@ -1696,10 +1643,28 @@ function LinkChip({ href, label }) {
                     <form onSubmit={saveCalendarEvent}>
                       <div style={{ display: "grid", gap: 12 }}>
                         <Field label="Otsikko"><Input value={calendarForm.title} onChange={(e) => setCalendarForm({ ...calendarForm, title: e.target.value })} /></Field>
-                        <Field label="Asiakas"><Select value={calendarForm.client_id} onChange={(e) => setCalendarForm({ ...calendarForm, client_id: e.target.value })}><option value="">Ei asiakasta</option>{clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
-                        <Field label="Tarjous"><Select value={calendarForm.quote_id} onChange={(e) => setCalendarForm({ ...calendarForm, quote_id: e.target.value })}><option value="">Ei tarjousta</option>{quotes.map((q) => <option key={q.id} value={q.id}>{q.quote_number || q.title}</option>)}</Select></Field>
-                        <Field label="Tyyppi"><Select value={calendarForm.event_type} onChange={(e) => setCalendarForm({ ...calendarForm, event_type: e.target.value })}>{CALENDAR_EVENT_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
-                        <Field label="Status"><Select value={calendarForm.status} onChange={(e) => setCalendarForm({ ...calendarForm, status: e.target.value })}>{CALENDAR_EVENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}</Select></Field>
+                        <Field label="Asiakas">
+                          <Select value={calendarForm.client_id} onChange={(e) => setCalendarForm({ ...calendarForm, client_id: e.target.value })}>
+                            <option value="">Ei asiakasta</option>
+                            {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Tarjous">
+                          <Select value={calendarForm.quote_id} onChange={(e) => setCalendarForm({ ...calendarForm, quote_id: e.target.value })}>
+                            <option value="">Ei tarjousta</option>
+                            {quotes.map((q) => <option key={q.id} value={q.id}>{q.quote_number || q.title}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Tyyppi">
+                          <Select value={calendarForm.event_type} onChange={(e) => setCalendarForm({ ...calendarForm, event_type: e.target.value })}>
+                            {CALENDAR_EVENT_TYPES.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
+                        <Field label="Status">
+                          <Select value={calendarForm.status} onChange={(e) => setCalendarForm({ ...calendarForm, status: e.target.value })}>
+                            {CALENDAR_EVENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                          </Select>
+                        </Field>
                         <Field label="Alkaa"><Input type="datetime-local" value={calendarForm.start_at} onChange={(e) => setCalendarForm({ ...calendarForm, start_at: e.target.value })} /></Field>
                         <Field label="Päättyy"><Input type="datetime-local" value={calendarForm.end_at} onChange={(e) => setCalendarForm({ ...calendarForm, end_at: e.target.value })} /></Field>
                         <Field label="Sijainti"><Input value={calendarForm.location} onChange={(e) => setCalendarForm({ ...calendarForm, location: e.target.value })} /></Field>
@@ -1712,18 +1677,28 @@ function LinkChip({ href, label }) {
                     <Title eyebrow="Lista" title="Kalenteritapahtumat" />
                     <table style={sx.table}>
                       <thead>
-                        <tr>{["Aika", "Otsikko", "Tyyppi", "Status", "Asiakas"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                        <tr>
+                          {["Aika", "Otsikko", "Tyyppi", "Status", "Asiakas"].map((h) => (
+                            <th key={h} style={sx.th}>{h}</th>
+                          ))}
+                        </tr>
                       </thead>
                       <tbody>
-                        {calendarEvents.map((e) => (
-                          <tr key={e.id}>
-                            <td style={sx.td}>{fmtDateTime(e.start_at)}</td>
-                            <td style={sx.td}>{e.title || "-"}</td>
-                            <td style={sx.td}>{e.event_type || "-"}</td>
-                            <td style={sx.td}>{e.status || "-"}</td>
-                            <td style={sx.td}>{clientMap.get(e.client_id)?.name || "-"}</td>
-                          </tr>
-                        ))}
+                        {calendarEvents
+                          .filter((e) =>
+                            !calendarFilter
+                              ? true
+                              : [e.title, e.event_type, e.status, e.location].filter(Boolean).some((v) => String(v).toLowerCase().includes(calendarFilter.toLowerCase()))
+                          )
+                          .map((e) => (
+                            <tr key={e.id}>
+                              <td style={sx.td}>{fmtDateTime(e.start_at)}</td>
+                              <td style={sx.td}>{e.title || "-"}</td>
+                              <td style={sx.td}>{e.event_type || "-"}</td>
+                              <td style={sx.td}>{e.status || "-"}</td>
+                              <td style={sx.td}>{clientMap.get(e.client_id)?.name || "-"}</td>
+                            </tr>
+                          ))}
                       </tbody>
                     </table>
                   </div>
@@ -1736,7 +1711,6 @@ function LinkChip({ href, label }) {
                 <Title eyebrow="Asetukset" title="Hinnoittelupohjat ja importit" />
                 <div style={{ display: "grid", gridTemplateColumns: "430px 1fr", gap: 18 }}>
                   <div style={sx.cardDark}>
-                    <Title eyebrow={editingTemplateId ? "Muokkaus" : "Uusi"} title={editingTemplateId ? "Päivitä hinnoittelupohja" : "Hinnoittelupohja"} />
                     <form onSubmit={saveTemplate}>
                       <div style={{ display: "grid", gap: 12 }}>
                         <Field label="Nimi"><Input value={templateForm.name} onChange={(e) => setTemplateForm({ ...templateForm, name: e.target.value, service_name: e.target.value })} /></Field>
@@ -1744,10 +1718,7 @@ function LinkChip({ href, label }) {
                         <Field label="Yksikkö"><Input value={templateForm.unit} onChange={(e) => setTemplateForm({ ...templateForm, unit: e.target.value })} /></Field>
                         <Field label="Yksikköhinta ALV 0"><Input type="number" value={templateForm.unit_price} onChange={(e) => setTemplateForm({ ...templateForm, unit_price: e.target.value })} /></Field>
                         <Field label="ALV %"><Input type="number" value={templateForm.vat_rate} onChange={(e) => setTemplateForm({ ...templateForm, vat_rate: e.target.value })} /></Field>
-                        <div style={{ display: "flex", gap: 10 }}>
-                          <Btn type="submit">{busy.template ? "Tallennetaan..." : editingTemplateId ? "Päivitä" : "Tallenna pohja"}</Btn>
-                          {editingTemplateId && <Btn type="button" variant="ghost" onClick={resetTemplateForm}>Peruuta</Btn>}
-                        </div>
+                        <Btn type="submit">{busy.template ? "Tallennetaan..." : "Tallenna pohja"}</Btn>
                       </div>
                     </form>
                   </div>
@@ -1756,7 +1727,11 @@ function LinkChip({ href, label }) {
                     <Title eyebrow="Hinnoittelupohjat" title="pricing_templates + import_logs" />
                     <table style={sx.table}>
                       <thead>
-                        <tr>{["Nimi", "Kategoria", "Yksikkö", "Hinta", "Toiminnot"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                        <tr>
+                          {["Nimi", "Kategoria", "Yksikkö", "Hinta"].map((h) => (
+                            <th key={h} style={sx.th}>{h}</th>
+                          ))}
+                        </tr>
                       </thead>
                       <tbody>
                         {pricingTemplates.map((r) => (
@@ -1765,7 +1740,6 @@ function LinkChip({ href, label }) {
                             <td style={sx.td}>{r.category || "-"}</td>
                             <td style={sx.td}>{r.unit || "-"}</td>
                             <td style={sx.td}>{eur(r.unit_price)}</td>
-                            <td style={sx.td}><Btn variant="ghost" onClick={() => startEditTemplate(r)}>Muokkaa</Btn></td>
                           </tr>
                         ))}
                       </tbody>
@@ -1775,7 +1749,11 @@ function LinkChip({ href, label }) {
                       <h3 style={{ marginTop: 0 }}>Import-lokit</h3>
                       <table style={sx.table}>
                         <thead>
-                          <tr>{["Aika", "Tyyppi", "Lähde", "Status", "Rivejä"].map((h) => <th key={h} style={sx.th}>{h}</th>)}</tr>
+                          <tr>
+                            {["Aika", "Tyyppi", "Lähde", "Status", "Rivejä"].map((h) => (
+                              <th key={h} style={sx.th}>{h}</th>
+                            ))}
+                          </tr>
                         </thead>
                         <tbody>
                           {importLogs
@@ -1784,9 +1762,7 @@ function LinkChip({ href, label }) {
                                 ? true
                                 : [r.import_type, r.source_name, r.status, r.file_name, r.source_system]
                                     .filter(Boolean)
-                                    .some((v) =>
-                                      String(v).toLowerCase().includes(importFilter.toLowerCase())
-                                    )
+                                    .some((v) => String(v).toLowerCase().includes(importFilter.toLowerCase()))
                             )
                             .map((r) => (
                               <tr key={r.id}>
