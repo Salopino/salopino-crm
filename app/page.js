@@ -357,6 +357,15 @@ export default function Page() {
   const [aiImportDocumentType, setAiImportDocumentType] = useState("Tuloslaskelma");
   const [aiAnalysisResult, setAiAnalysisResult] = useState(null);
 
+  // API → tarjousrivi hinnastosta
+  const [apiTemplates, setApiTemplates] = useState([]);
+  const [selectedQuoteIdForApi, setSelectedQuoteIdForApi] = useState("");
+  const [templateServiceName, setTemplateServiceName] = useState("");
+  const [templateQuantity, setTemplateQuantity] = useState(1);
+  const [templateManualPrice, setTemplateManualPrice] = useState("");
+  const [templateDescription, setTemplateDescription] = useState("");
+  const [calculatedLine, setCalculatedLine] = useState(null);
+
   const [busy, setBusy] = useState({
     client: false,
     quote: false,
@@ -365,6 +374,12 @@ export default function Page() {
     template: false,
     calendar: false,
     aiImport: false,
+  });
+
+  const [busyApi, setBusyApi] = useState({
+    templates: false,
+    calculate: false,
+    addLine: false,
   });
 
   async function loadData() {
@@ -414,8 +429,124 @@ export default function Page() {
     }
   }
 
+  async function loadApiTemplates() {
+    setBusyApi((b) => ({ ...b, templates: true }));
+    setError("");
+    try {
+      const res = await fetch("/api/pricing-templates", {
+        method: "GET",
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || "Hinnoittelupohjien haku epäonnistui.");
+      }
+
+      setApiTemplates(json.data || []);
+
+      if ((json.data || []).length > 0 && !templateServiceName) {
+        setTemplateServiceName(json.data[0].service_name);
+      }
+    } catch (err) {
+      setError(err.message || "Hinnoittelupohjien haku epäonnistui.");
+    } finally {
+      setBusyApi((b) => ({ ...b, templates: false }));
+    }
+  }
+
+  async function calculateTemplateLine() {
+    setBusyApi((b) => ({ ...b, calculate: true }));
+    setError("");
+    try {
+      if (!templateServiceName) {
+        throw new Error("Valitse palvelu.");
+      }
+
+      const res = await fetch("/api/quote-calculate-line", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          service_name: templateServiceName,
+          quantity: Number(templateQuantity || 1),
+          manual_unit_price:
+            templateManualPrice === "" ? null : Number(templateManualPrice),
+        }),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || "Tarjousrivin laskenta epäonnistui.");
+      }
+
+      setCalculatedLine(json.data || null);
+
+      if (!templateDescription && json.data?.service_name) {
+        setTemplateDescription(json.data.service_name);
+      }
+    } catch (err) {
+      setError(err.message || "Tarjousrivin laskenta epäonnistui.");
+    } finally {
+      setBusyApi((b) => ({ ...b, calculate: false }));
+    }
+  }
+
+  async function addCalculatedLineToQuote() {
+    setBusyApi((b) => ({ ...b, addLine: true }));
+    setError("");
+    try {
+      if (!selectedQuoteIdForApi) {
+        throw new Error("Valitse ensin tarjous.");
+      }
+
+      if (!templateServiceName) {
+        throw new Error("Valitse palvelu.");
+      }
+
+      const res = await fetch("/api/quote-add-line", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          quote_id: selectedQuoteIdForApi,
+          service_name: templateServiceName,
+          quantity: Number(templateQuantity || 1),
+          manual_unit_price:
+            templateManualPrice === "" ? null : Number(templateManualPrice),
+          description: templateDescription || null,
+        }),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || "Tarjousrivin lisäys epäonnistui.");
+      }
+
+      setSuccess("Tarjousrivi lisätty tarjoukselle.");
+      setCalculatedLine(null);
+      setTemplateQuantity(1);
+      setTemplateManualPrice("");
+      setTemplateDescription("");
+
+      await loadData();
+    } catch (err) {
+      setError(err.message || "Tarjousrivin lisäys epäonnistui.");
+    } finally {
+      setBusyApi((b) => ({ ...b, addLine: false }));
+    }
+  }
+
   useEffect(() => {
     loadData();
+  }, []);
+
+  useEffect(() => {
+    loadApiTemplates();
   }, []);
 
   useEffect(() => {
@@ -920,6 +1051,121 @@ export default function Page() {
             {view === "quotes" && (
               <section>
                 <Title eyebrow="Tarjoukset" title="Tarjousten hallinta" />
+
+                <div style={{ ...sx.card, marginBottom: 18 }}>
+                  <Title
+                    eyebrow="API + laskenta"
+                    title="Lisää tarjousrivi hinnastosta"
+                    right={
+                      <Btn type="button" variant="ghost" onClick={loadApiTemplates}>
+                        {busyApi.templates ? "Haetaan..." : "Päivitä hinnasto"}
+                      </Btn>
+                    }
+                  />
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+                    <div>
+                      <div style={{ display: "grid", gap: 12 }}>
+                        <Field label="Valitse tarjous">
+                          <Select
+                            value={selectedQuoteIdForApi}
+                            onChange={(e) => setSelectedQuoteIdForApi(e.target.value)}
+                          >
+                            <option value="">Valitse tarjous</option>
+                            {quotes.map((q) => (
+                              <option key={q.id} value={q.id}>
+                                {(q.quote_number || "Ei numeroa") + " — " + (q.title || "Ei otsikkoa")}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+
+                        <Field label="Palvelu hinnastosta">
+                          <Select
+                            value={templateServiceName}
+                            onChange={(e) => setTemplateServiceName(e.target.value)}
+                          >
+                            <option value="">Valitse palvelu</option>
+                            {apiTemplates.map((tpl) => (
+                              <option key={tpl.id} value={tpl.service_name}>
+                                {tpl.service_name} ({tpl.unit} / {eur(tpl.unit_price)})
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                          <Field label="Määrä">
+                            <Input
+                              type="number"
+                              value={templateQuantity}
+                              onChange={(e) => setTemplateQuantity(e.target.value)}
+                            />
+                          </Field>
+
+                          <Field label="Yliaja yksikköhinta (valinnainen)">
+                            <Input
+                              type="number"
+                              value={templateManualPrice}
+                              onChange={(e) => setTemplateManualPrice(e.target.value)}
+                              placeholder="Esim. 1.20"
+                            />
+                          </Field>
+                        </div>
+
+                        <Field label="Kuvaus riville">
+                          <Input
+                            value={templateDescription}
+                            onChange={(e) => setTemplateDescription(e.target.value)}
+                            placeholder="Esim. Kiinteistön 3D-kuvaus / 500 m²"
+                          />
+                        </Field>
+
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <Btn type="button" variant="ghost" onClick={calculateTemplateLine}>
+                            {busyApi.calculate ? "Lasketaan..." : "Laske rivi"}
+                          </Btn>
+
+                          <Btn type="button" onClick={addCalculatedLineToQuote}>
+                            {busyApi.addLine ? "Lisätään..." : "Lisää tarjousriviksi"}
+                          </Btn>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <div style={{ ...sx.cardDark, minHeight: 220 }}>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            textTransform: "uppercase",
+                            color: "rgba(244,241,233,.66)",
+                            marginBottom: 10,
+                            fontWeight: 700,
+                          }}
+                        >
+                          Laskettu tarjousrivi
+                        </div>
+
+                        {!calculatedLine ? (
+                          <div style={{ color: "rgba(244,241,233,.64)" }}>
+                            Laske palvelurivi ensin. Tähän tulee API:n palauttama laskenta.
+                          </div>
+                        ) : (
+                          <div style={{ display: "grid", gap: 10 }}>
+                            <div><strong>Palvelu:</strong> {calculatedLine.service_name}</div>
+                            <div><strong>Yksikkö:</strong> {calculatedLine.unit}</div>
+                            <div><strong>Määrä:</strong> {calculatedLine.quantity}</div>
+                            <div><strong>Yksikköhinta:</strong> {eur(calculatedLine.unit_price)}</div>
+                            <div><strong>Rivisumma:</strong> {eur(calculatedLine.line_total)}</div>
+                            <div><strong>ALV %:</strong> {calculatedLine.vat_rate}</div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div style={{ display: "grid", gridTemplateColumns: "560px 1fr", gap: 18 }}>
                   <div style={sx.cardDark}>
                     <form onSubmit={saveQuote}>
