@@ -14,7 +14,9 @@ export async function POST(req) {
     const service_name = body.service_name;
     const quantity = Number(body.quantity ?? 1);
     const manual_unit_price =
-      body.manual_unit_price === null || body.manual_unit_price === undefined || body.manual_unit_price === ""
+      body.manual_unit_price === null ||
+      body.manual_unit_price === undefined ||
+      body.manual_unit_price === ""
         ? null
         : Number(body.manual_unit_price);
     const description = body.description ?? null;
@@ -41,9 +43,7 @@ export async function POST(req) {
       p_description: description,
     });
 
-    if (error) {
-      throw error;
-    }
+    if (error) throw error;
 
     return NextResponse.json({
       success: true,
